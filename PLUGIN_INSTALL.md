@@ -137,10 +137,12 @@ bash skills/pdb/scripts/pdb detail 7WC7 --json | head -5
 bash skills/pdb/scripts/pdb search HTR2A --json | jq '.summary'
 # 기대: is_gpcr=true, fetched_count≈32, gpcrdb_count>10
 
-# 5) 단위 테스트 (선택)
-.venv/bin/python -m pytest tests/ -q
-# 기대: 119 passed
+# 5) (선택) cli 진입점 직접 확인
+.venv/bin/python cli.py compare --targets EGFR,HER2 --md | head -10
+# 기대: 2행짜리 마크다운 비교 표
 ```
+
+> 단위 테스트(`pytest tests/`)는 사내 원본 PDBMCP 저장소에서만 가능합니다 — Plugin 배포본에는 `tests/`가 포함되어 있지 않습니다.
 
 Claude Code 안에서:
 
@@ -178,12 +180,12 @@ Claude Code 안에서:
 
 ## MCP 서버와의 관계
 
-이 Skill은 기존 MCP 서버(`server.py`, `mcpb/`, `deploy-server/`)와 **완전히 독립**되어 있습니다.
+이 Skill과 MCP 서버는 같은 `tools/` Python 모듈을 공유하지만 진입점이 분리되어 있습니다.
 
-- Claude Desktop 사용자 → 기존 MCP 서버 그대로 사용
-- Claude Code 사용자 → 이 Plugin 사용
+- Claude Desktop 사용자 → MCP 서버 (`server.py`, `.mcpb` 패키지, 사내 SSE/HTTP 배포)
+- Claude Code 사용자 → 이 Plugin (`/pdb` 슬래시 명령)
 
-두 진입점이 같은 `tools/` Python 모듈을 공유하므로 데이터 일관성이 보장됩니다.
+Plugin 배포본의 `server.py`는 `cli.py`가 헬퍼 함수를 재사용하기 위해 import용으로만 포함됩니다 — Plugin 사용자가 직접 호출하지는 않습니다. MCP 서버 빌드(`.mcpb`)·배포 자산(`Docker`)은 이 GitHub repo에 포함되어 있지 않으며 사내 원본 PDBMCP 저장소에 있습니다. 자세한 내용은 [README_MCP.md](README_MCP.md) 참조.
 
 ---
 
