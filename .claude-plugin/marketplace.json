@@ -1,0 +1,16 @@
+{
+  "name": "pdb",
+  "description": "PDB 단백질 구조 리서치 Claude Code Plugin Marketplace — 나무아이씨티 신약연구소",
+  "owner": {
+    "name": "dhjung-blip",
+    "email": "aidrugdev2.namuict@gmail.com",
+    "url": "https://github.com/dhjung-blip"
+  },
+  "plugins": [
+    {
+      "name": "pdb",
+      "description": "PDB 단백질 구조 검색·분석 통합 Skill — UniProt/RCSB/GPCRdb/PubChem/ChEMBL/Europe PMC/AlphaFold/OpenTargets 13개 외부 API를 단일 슬래시 명령(/pdb)으로 노출",
+      "source": "."
+    }
+  ]
+}

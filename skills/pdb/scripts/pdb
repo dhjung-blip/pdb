@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# /pdb Skill 진입점 — Plugin install / Project mode 양쪽 지원.
+#
+# venv 위치 우선순위:
+#   1. ${CLAUDE_PLUGIN_DATA}/.venv         (Plugin install + update 후에도 유지)
+#   2. ${CLAUDE_PLUGIN_ROOT}/.venv         (Plugin install 직후, update 시 사라질 수 있음)
+#   3. ${REPO_ROOT}/.venv                  (Project mode — git clone 사용)
+#   4. ${REPO_ROOT}/.venv_location 의 경로 (setup.sh 가 기록한 절대경로)
+#
+# cli.py 위치는 항상 plugin/저장소 루트(REPO_ROOT)로 잡는다.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# scripts/ → skills/pdb/scripts → 3단계 위가 plugin/저장소 루트
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+CLI="$REPO_ROOT/cli.py"
+
+# --- venv 위치 결정 ---
+VENV_PY=""
+for candidate in \
+    "${CLAUDE_PLUGIN_DATA:-}/.venv/bin/python" \
+    "${CLAUDE_PLUGIN_ROOT:-}/.venv/bin/python" \
+    "$REPO_ROOT/.venv/bin/python"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        VENV_PY="$candidate"
+        break
+    fi
+done
+
+# --- setup.sh 가 기록한 .venv_location 도 확인 ---
+if [[ -z "$VENV_PY" && -f "$REPO_ROOT/.venv_location" ]]; then
+    recorded="$(cat "$REPO_ROOT/.venv_location")"
+    if [[ -x "$recorded/bin/python" ]]; then
+        VENV_PY="$recorded/bin/python"
+    fi
+fi
+
+if [[ -z "$VENV_PY" ]]; then
+    cat >&2 <<EOF
+[pdb] venv가 아직 만들어지지 않았습니다.
+
+설치 절차:
+  cd $REPO_ROOT
+  bash setup.sh
+
+setup.sh는 Python 3.11+ 가상환경을 만들고 httpx/openpyxl/pydantic/mcp를
+설치합니다. 한 번만 실행하면 됩니다.
+
+검색된 위치:
+  - \${CLAUDE_PLUGIN_DATA}/.venv      : ${CLAUDE_PLUGIN_DATA:-(not set)}/.venv
+  - \${CLAUDE_PLUGIN_ROOT}/.venv      : ${CLAUDE_PLUGIN_ROOT:-(not set)}/.venv
+  - REPO_ROOT/.venv                   : $REPO_ROOT/.venv
+EOF
+    exit 1
+fi
+
+if [[ ! -f "$CLI" ]]; then
+    echo "[pdb] cli.py를 찾지 못했습니다: $CLI" >&2
+    echo "[pdb] plugin 설치가 손상되었을 수 있습니다." >&2
+    exit 1
+fi
+
+exec "$VENV_PY" "$CLI" "$@"

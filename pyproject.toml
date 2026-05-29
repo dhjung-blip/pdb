@@ -1,0 +1,34 @@
+[project]
+name = "pdb-mcp-server"
+version = "0.1.0"
+description = "PDB 연구 자동화 MCP 서버"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.27.1",
+    "httpx>=0.27.0",
+    "openpyxl>=3.1.0",
+    "pydantic>=2.0.0",
+    "starlette>=0.36",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+pdb-mcp-server = "server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server"]
+packages = ["tools", "models"]
+
+[tool.pytest.ini_options]
+markers = [
+    "network: 실제 외부 API를 호출하는 테스트 (오프라인 시 'pytest -m \"not network\"' 로 제외)",
+]

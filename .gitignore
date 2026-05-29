@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- 가상환경 (사용자별로 setup.sh가 생성) ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- 빌드 / 산출물 ---
+build/
+dist/
+*.mcpb
+*.egg-info/
+*.egg
+
+# --- 풀어둔 빌드 산출물 / 백업 폴더 ---
+PDBMCP-local/
+PDBMCP-mcpb/
+
+# --- 런타임 출력 ---
+output/
+*.xlsx
+.python.tar.gz
+.pbs.tar.gz
+
+# --- 테스트 / 캐시 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# --- IDE / 시스템 ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- 대용량 zip (별도 배포) ---
+dist.zip
+PDBMCP-local.zip
+*.tar.gz
+
+# --- Project-mode 호환 심볼릭 링크 (setup.sh가 생성) ---
+.claude/skills/
+
+# --- setup.sh 가 기록하는 venv 위치 메모 ---
+.venv_location
+
+# --- 로컬 환경/시크릿 ---
+.env
+.env.local
+*.local
