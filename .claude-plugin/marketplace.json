@@ -10,7 +10,10 @@
     {
       "name": "pdb",
       "description": "PDB 단백질 구조 검색·분석 통합 Skill — UniProt/RCSB/GPCRdb/PubChem/ChEMBL/Europe PMC/AlphaFold/OpenTargets 13개 외부 API를 단일 슬래시 명령(/pdb)으로 노출",
-      "source": "."
+      "source": {
+        "source": "github",
+        "repo": "dhjung-blip/pdb"
+      }
     }
   ]
 }
