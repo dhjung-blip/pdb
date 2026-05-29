@@ -57,3 +57,20 @@ PDBMCP-local.zip
 .env
 .env.local
 *.local
+
+# --- 사내 전용 문서·체크리스트·서브에이전트 (배포 제외) ---
+MIGRATION_LANGGRAPH.md
+pdb_research_mcp_checklist.md
+.claude/agents/
+.dockerignore
+.mcpbignore
+
+# --- Plugin 사용자에게 불필요한 코드·문서 (배포 제외) ---
+tests/
+conftest.py
+deploy-server/
+mcpb/
+CLAUDE.md
+USAGE_GUIDE.md
+SYSTEM_PROMPT.md
+COVERAGE.md

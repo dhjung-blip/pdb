@@ -69,6 +69,7 @@ from tools.sequence import (
     fetch_natural_variants,
     fetch_sequence_region,
 )
+from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.uniprot import UniProtError, search_uniprot
 
 server = Server("pdb-research-server")
@@ -930,6 +931,24 @@ async def _collect_target_search(
     except Exception:
         return None, {}, "외부 API 연결에 실패했습니다. 네트워크 연결을 확인해주세요."
 
+    # STEP 2b: RCSB Search API로 PDB ID 보강 (Union).
+    # UniProt cross-reference는 RCSB 신규 등록 후 며칠~수주 지연이 있다.
+    # RCSB Search를 union 처리하면 그 사이 등록된 신규 구조도 결과에 포함된다.
+    uniprot_indexed_count = len(uniprot.pdb_ids)
+    uniprot_set = {pid.upper() for pid in uniprot.pdb_ids}
+    rcsb_search_warning: str | None = None
+    try:
+        rcsb_ids = await search_pdb_ids_by_uniprot(uniprot.accession)
+    except RCSBSearchError as exc:
+        rcsb_ids = []
+        rcsb_search_warning = (
+            f"RCSB Search API 일시 장애 — UniProt cross-reference만 사용했습니다. ({exc})"
+        )
+    rcsb_set = {pid.upper() for pid in rcsb_ids}
+    unindexed_ids = sorted(rcsb_set - uniprot_set)
+    if unindexed_ids:
+        uniprot.pdb_ids = sorted(uniprot_set | rcsb_set)
+
     if not uniprot.pdb_ids:
         return None, {}, (
             f"'{uniprot.protein_name}' ({uniprot.accession})의 실험 구조가 "
@@ -1030,11 +1049,15 @@ async def _collect_target_search(
     # GPCRdb 커버리지가 50% 미만이면 사용자/LLM에 명시적 경고를 띄운다.
     # — Option C: LLM이 자체 지식으로 비어 있는 state/ligand/modality 컬럼을 채워
     #   누락 구조를 만들지 않도록 명시적 가드를 제공한다.
+    # RCSB Search로 추가된 신규 구조(unindexed_ids)는 GPCRdb 미수록이 자연스러우므로
+    # 분모에서 제외해 false-positive 경고를 줄인다.
     warnings: list[str] = []
     if is_gpcr and fetched_count > 0:
-        coverage = (gpcrdb_count or 0) / fetched_count
+        unindexed_in_fetched = sum(1 for e in structures if e.pdb_id in set(unindexed_ids))
+        denom = max(fetched_count - unindexed_in_fetched, 1)
+        coverage = (gpcrdb_count or 0) / denom
         if coverage < 0.5:
-            shortage = fetched_count - (gpcrdb_count or 0)
+            shortage = denom - (gpcrdb_count or 0)
             warnings.append(
                 f"GPCRdb 일시 장애 또는 데이터 미수록으로 {shortage}개 구조의 "
                 f"state/ligand/modality 정보를 가져오지 못했습니다. "
@@ -1061,12 +1084,18 @@ async def _collect_target_search(
     if warnings:
         gpcrdb_warning = "\n> ".join(warnings)
 
+    # 실제 fetched된 구조 중 RCSB Search로만 발견된 것만 추적 (메타데이터 조회 실패한 신규는 제외)
+    fetched_pdb_ids = {e.pdb_id for e in structures}
+    unindexed_in_result = sorted(pid for pid in unindexed_ids if pid in fetched_pdb_ids)
+
     result = SearchResult(
         query=target,
         uniprot=uniprot,
         structures=structures,
         total_count=total_registered,
         gpcrdb_count=gpcrdb_count,
+        unindexed_pdb_ids=unindexed_in_result,
+        uniprot_indexed_count=uniprot_indexed_count,
     )
     metadata = {
         "fetched_count": fetched_count,
@@ -1075,6 +1104,9 @@ async def _collect_target_search(
         "filter_notes": filter_notes,
         "gpcrdb_warning": gpcrdb_warning,
         "failed_pdb_ids": failed_pdb_ids,
+        "unindexed_pdb_ids": unindexed_in_result,
+        "uniprot_indexed_count": uniprot_indexed_count,
+        "rcsb_search_warning": rcsb_search_warning,
     }
     return result, metadata, None
 
@@ -1107,6 +1139,8 @@ async def handle_search_target(arguments: dict) -> list[types.TextContent]:
             metadata["effective_sort"], metadata["filter_notes"],
             export_error, metadata["gpcrdb_warning"],
             metadata.get("failed_pdb_ids") or [],
+            metadata.get("unindexed_pdb_ids") or [],
+            metadata.get("rcsb_search_warning"),
         )
     else:
         text = _render_basic_result(
@@ -1115,6 +1149,8 @@ async def handle_search_target(arguments: dict) -> list[types.TextContent]:
             metadata["effective_sort"], metadata["filter_notes"],
             export_error,
             metadata.get("failed_pdb_ids") or [],
+            metadata.get("unindexed_pdb_ids") or [],
+            metadata.get("rcsb_search_warning"),
         )
     return _text(text)
 
@@ -1170,6 +1206,17 @@ async def handle_search_family(arguments: dict) -> list[types.TextContent]:
         )
         if metadata.get("gpcrdb_warning"):
             details.append(f"- **{target}**: {metadata['gpcrdb_warning']}")
+        unindexed = metadata.get("unindexed_pdb_ids") or []
+        if unindexed:
+            sample = ", ".join(unindexed[:3])
+            rest = len(unindexed) - 3
+            extra = f" 외 {rest}개" if rest > 0 else ""
+            details.append(
+                f"- **{target}**: 신규 {len(unindexed)}개 구조가 UniProt 미반영 "
+                f"(RCSB Search 직접 조회): {sample}{extra}"
+            )
+        if metadata.get("rcsb_search_warning"):
+            details.append(f"- **{target}**: {metadata['rcsb_search_warning']}")
 
     if not results:
         lines = ["## 패밀리 구조 검색 실패", ""]
@@ -1237,6 +1284,31 @@ def _render_meta(lines: list[str], sort_by: str, fetched_count: int,
         lines.append(f"필터 조건: {', '.join(filter_notes)}")
 
 
+def _append_unindexed_note(
+    lines: list[str],
+    unindexed_pdb_ids: list[str] | None,
+    rcsb_search_warning: str | None,
+) -> None:
+    """RCSB Search로만 발견된 신규 구조(UniProt 미반영)와 Search API 장애 경고를 표 하단에 한 줄로 표시.
+
+    PDB ID가 5개를 넘으면 앞 5개만 보여주고 "외 N개" 형태로 압축한다.
+    """
+    if unindexed_pdb_ids:
+        sample = unindexed_pdb_ids[:5]
+        rest = len(unindexed_pdb_ids) - len(sample)
+        ids_text = ", ".join(sample)
+        if rest > 0:
+            ids_text += f" 외 {rest}개"
+        lines.append("")
+        lines.append(
+            f"> ℹ️ 신규 {len(unindexed_pdb_ids)}개 구조가 UniProt cross-reference에 "
+            f"아직 반영되지 않았습니다 (RCSB Search 직접 조회): {ids_text}"
+        )
+    if rcsb_search_warning:
+        lines.append("")
+        lines.append(f"> ⚠️ {rcsb_search_warning}")
+
+
 def _render_basic_result(
     result: SearchResult,
     display: list[PDBEntry],
@@ -1246,6 +1318,8 @@ def _render_basic_result(
     filter_notes: list[str],
     export_error: str | None,
     failed_pdb_ids: list[str] | None = None,
+    unindexed_pdb_ids: list[str] | None = None,
+    rcsb_search_warning: str | None = None,
 ) -> str:
     """비GPCR 타깃 — 기본 테이블."""
     lines = _render_header(result.uniprot, result.query, total_registered, gpcr=False)
@@ -1258,6 +1332,8 @@ def _render_basic_result(
         )
         if failed_pdb_ids:
             lines.append(f"> 실패한 PDB ID: {', '.join(failed_pdb_ids)}")
+
+    _append_unindexed_note(lines, unindexed_pdb_ids, rcsb_search_warning)
 
     _render_meta(lines, sort_by, fetched_count, len(result.structures),
                  len(display), filter_notes, None)
@@ -1288,6 +1364,8 @@ def _render_gpcr_result(
     export_error: str | None,
     gpcrdb_warning: str | None,
     failed_pdb_ids: list[str] | None = None,
+    unindexed_pdb_ids: list[str] | None = None,
+    rcsb_search_warning: str | None = None,
 ) -> str:
     """GPCR 타깃 — State/Ligand/Modality 등을 포함한 확장 테이블."""
     lines = _render_header(result.uniprot, result.query, total_registered, gpcr=True)
@@ -1302,6 +1380,8 @@ def _render_gpcr_result(
     if gpcrdb_warning:
         lines.append("")
         lines.append(f"> ⚠️ {gpcrdb_warning}")
+
+    _append_unindexed_note(lines, unindexed_pdb_ids, rcsb_search_warning)
 
     _render_meta(lines, sort_by, fetched_count, len(result.structures),
                  len(display), filter_notes, result.gpcrdb_count or 0)

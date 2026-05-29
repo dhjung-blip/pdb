@@ -43,6 +43,10 @@ def _summarize_search(result: SearchResult) -> dict:
         "registered_count": result.total_count,
         "is_gpcr": result.uniprot.is_gpcr,
         "gpcrdb_count": result.gpcrdb_count,
+        # RCSB Search union — UniProt 미반영 신규 구조 정보
+        "uniprot_indexed_count": result.uniprot_indexed_count,
+        "unindexed_pdb_ids": list(result.unindexed_pdb_ids),
+        "unindexed_count": len(result.unindexed_pdb_ids),
         "best_resolution": (
             {"pdb_id": best.pdb_id, "resolution": best.resolution} if best else None
         ),
@@ -123,18 +127,22 @@ def _render_markdown_search(result: DispatchResult) -> str:
     md = result.metadata
     display = sr.structures  # cli는 --max-structures를 적용하지 않음 (LLM이 자름)
     failed_ids = md.get("failed_pdb_ids") or []
+    unindexed_ids = md.get("unindexed_pdb_ids") or []
+    rcsb_warning = md.get("rcsb_search_warning")
     if sr.uniprot.is_gpcr:
         return server._render_gpcr_result(
             sr, display,
             md["fetched_count"], md["total_registered"],
             md["effective_sort"], md["filter_notes"],
             None, md.get("gpcrdb_warning"), failed_ids,
+            unindexed_ids, rcsb_warning,
         )
     return server._render_basic_result(
         sr, display,
         md["fetched_count"], md["total_registered"],
         md["effective_sort"], md["filter_notes"],
         None, failed_ids,
+        unindexed_ids, rcsb_warning,
     )
 
 
@@ -167,6 +175,17 @@ def _render_markdown_family(result: DispatchResult) -> str:
         meta = item.get("metadata") or {}
         if meta.get("gpcrdb_warning"):
             details.append(f"- **{target}**: {meta['gpcrdb_warning']}")
+        unindexed = meta.get("unindexed_pdb_ids") or []
+        if unindexed:
+            sample = ", ".join(unindexed[:3])
+            rest = len(unindexed) - 3
+            extra = f" 외 {rest}개" if rest > 0 else ""
+            details.append(
+                f"- **{target}**: 신규 {len(unindexed)}개 구조가 UniProt 미반영 "
+                f"(RCSB Search 직접 조회): {sample}{extra}"
+            )
+        if meta.get("rcsb_search_warning"):
+            details.append(f"- **{target}**: {meta['rcsb_search_warning']}")
     if details:
         lines.append("")
         lines.extend(details)
@@ -216,6 +235,16 @@ def _render_markdown_compare(result: DispatchResult) -> str:
                 f"- **{target}** ({row['accession']}): {row['total']}개 중 "
                 f"{len(row['failed_pdb_ids'])}개 메타데이터 조회 실패 — "
                 f"{', '.join(row['failed_pdb_ids'])}"
+            )
+        unindexed = row.get("unindexed_pdb_ids") or []
+        if unindexed:
+            sample = ", ".join(unindexed[:3])
+            rest = len(unindexed) - 3
+            extra = f" 외 {rest}개" if rest > 0 else ""
+            details.append(
+                f"- **{target}** ({row.get('accession') or '-'}): 신규 "
+                f"{len(unindexed)}개 구조가 UniProt 미반영 "
+                f"(RCSB Search 직접 조회): {sample}{extra}"
             )
     if details:
         lines.append("")

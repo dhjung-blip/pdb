@@ -1,6 +1,6 @@
 # Excel 출력 표준 (xlsx 스킬로 생성할 때 반드시 따를 규격)
 
-`/pdb` Skill은 cli가 절대 `.xlsx`를 만들지 않는다. JSON을 받아 이 규격대로 별도 **xlsx 스킬**로 생성한다. 이 문서는 [SYSTEM_PROMPT.md](../../../../SYSTEM_PROMPT.md)의 Excel 표준을 Skill 사용자(LLM 자신)가 바로 참고할 수 있게 추출한 것이다. SYSTEM_PROMPT의 원본과 동일하게 유지한다.
+`/pdb` Skill은 cli가 절대 `.xlsx`를 만들지 않는다. JSON을 받아 이 규격대로 별도 **xlsx 스킬**로 생성한다. **이 문서가 Excel 출력 규격의 단일 원천(single source of truth)**이며, 모든 셀·시트·서식·정렬은 아래 명세를 그대로 따른다.
 
 ---
 

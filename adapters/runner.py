@@ -45,6 +45,7 @@ from tools.sequence import (
     fetch_natural_variants,
     fetch_sequence_region,
 )
+from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.uniprot import UniProtError, search_uniprot
 
 
@@ -232,6 +233,19 @@ async def run_compare(args: argparse.Namespace) -> DispatchResult:
             continue
 
         is_gpcr, _ = await check_gpcr(uniprot.entry_name)
+
+        # RCSB Search union — UniProt 동기화 지연 구간의 신규 구조도 비교에 반영
+        uniprot_indexed_count = len(uniprot.pdb_ids)
+        uniprot_set = {pid.upper() for pid in uniprot.pdb_ids}
+        try:
+            rcsb_ids = await search_pdb_ids_by_uniprot(uniprot.accession)
+        except RCSBSearchError:
+            rcsb_ids = []
+        rcsb_set = {pid.upper() for pid in rcsb_ids}
+        unindexed = sorted(rcsb_set - uniprot_set)
+        if unindexed:
+            uniprot.pdb_ids = sorted(uniprot_set | rcsb_set)
+
         if not uniprot.pdb_ids:
             rows.append({
                 "target": target,
@@ -239,6 +253,8 @@ async def run_compare(args: argparse.Namespace) -> DispatchResult:
                 "gene": uniprot.gene_name,
                 "is_gpcr": is_gpcr,
                 "total": 0,
+                "uniprot_indexed_count": uniprot_indexed_count,
+                "unindexed_pdb_ids": unindexed,
                 "best_resolution": None,
                 "latest": None,
                 "status": "no_structures",
@@ -254,6 +270,8 @@ async def run_compare(args: argparse.Namespace) -> DispatchResult:
                 "gene": uniprot.gene_name,
                 "is_gpcr": is_gpcr,
                 "total": len(uniprot.pdb_ids),
+                "uniprot_indexed_count": uniprot_indexed_count,
+                "unindexed_pdb_ids": unindexed,
                 "best_resolution": None,
                 "latest": None,
                 "status": "pdb_error",
@@ -270,6 +288,8 @@ async def run_compare(args: argparse.Namespace) -> DispatchResult:
             "gene": uniprot.gene_name,
             "is_gpcr": is_gpcr,
             "total": len(uniprot.pdb_ids),
+            "uniprot_indexed_count": uniprot_indexed_count,
+            "unindexed_pdb_ids": unindexed,
             "fetched": len(structures),
             "failed_pdb_ids": failed,
             "best_resolution": best,

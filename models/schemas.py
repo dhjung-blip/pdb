@@ -68,6 +68,10 @@ class SearchResult(BaseModel):
     total_count: int = 0
     exported_file: Optional[str] = None  # Excel 저장 시 파일 경로
     gpcrdb_count: Optional[int] = None  # GPCRdb 메타데이터가 병합된 구조 수
+    # RCSB Search API로 추가 발견된 PDB ID (UniProt cross-reference에 아직 없는 신규 구조)
+    unindexed_pdb_ids: List[str] = Field(default_factory=list)
+    # UniProt cross-reference에 등록된 PDB ID 수 — union 이전 카운트
+    uniprot_indexed_count: int = 0
 
 
 # ==========================================================================
