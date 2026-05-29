@@ -84,13 +84,11 @@ if [[ "$RECREATE" -eq 1 && -d "$VENV_DIR" ]]; then
 fi
 
 # --- venv 생성 ---
+# 항상 표준 venv 모듈 사용 (pip 자동 포함). uv venv 는 pip 을 묶지 않아
+# 그 뒤 의존성 설치 단계에서 'No module named pip' 에러가 난다.
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     info "venv 생성 중…"
-    if command -v uv >/dev/null 2>&1; then
-        uv venv -p "$PYTHON_BIN" "$VENV_DIR"
-    else
-        "$PYTHON_BIN" -m venv "$VENV_DIR"
-    fi
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
 else
     info "venv 이미 존재 — 건너뜀 (--recreate 로 강제 재생성)"
 fi
@@ -98,14 +96,28 @@ fi
 VENV_PY="$VENV_DIR/bin/python"
 
 # --- 의존성 설치 ---
+# uv 가 있으면 더 빠른 'uv pip install' 사용 (해상도 캐시), 없으면 표준 pip.
 info "의존성 설치 중… (httpx, openpyxl, pydantic, mcp)"
-"$VENV_PY" -m pip install --upgrade pip --quiet
-if [[ -f "$REPO_ROOT/requirements.txt" ]]; then
-    "$VENV_PY" -m pip install -q -r "$REPO_ROOT/requirements.txt"
-elif [[ -f "$REPO_ROOT/pyproject.toml" ]]; then
-    "$VENV_PY" -m pip install -q "$REPO_ROOT"
+if command -v uv >/dev/null 2>&1; then
+    info "uv 감지됨 — uv pip install 사용"
+    if [[ -f "$REPO_ROOT/requirements.txt" ]]; then
+        uv pip install --python "$VENV_PY" -q -r "$REPO_ROOT/requirements.txt"
+    elif [[ -f "$REPO_ROOT/pyproject.toml" ]]; then
+        uv pip install --python "$VENV_PY" -q "$REPO_ROOT"
+    else
+        uv pip install --python "$VENV_PY" -q \
+            "httpx>=0.27.0" "openpyxl>=3.1.0" "pydantic>=2.0.0" "mcp>=1.0.0"
+    fi
 else
-    "$VENV_PY" -m pip install -q "httpx>=0.27.0" "openpyxl>=3.1.0" "pydantic>=2.0.0" "mcp>=1.0.0"
+    "$VENV_PY" -m pip install --upgrade pip --quiet
+    if [[ -f "$REPO_ROOT/requirements.txt" ]]; then
+        "$VENV_PY" -m pip install -q -r "$REPO_ROOT/requirements.txt"
+    elif [[ -f "$REPO_ROOT/pyproject.toml" ]]; then
+        "$VENV_PY" -m pip install -q "$REPO_ROOT"
+    else
+        "$VENV_PY" -m pip install -q \
+            "httpx>=0.27.0" "openpyxl>=3.1.0" "pydantic>=2.0.0" "mcp>=1.0.0"
+    fi
 fi
 
 # --- VENV_DIR 위치를 plugin 셸 래퍼가 찾을 수 있도록 기록 ---
