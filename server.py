@@ -1543,6 +1543,19 @@ async def handle_compare_targets(arguments: dict) -> list[types.TextContent]:
         is_gpcr, _ = await check_gpcr(uniprot.entry_name)
         type_label = "🧬 GPCR" if is_gpcr else "일반"
 
+        # RCSB Search union — UniProt 동기화 지연 구간의 신규 구조 보강.
+        # compare는 N개 타깃을 순차 처리하므로 한 타깃의 Search 장애가
+        # 전체 비교를 막지 않도록 빈 리스트로 graceful degrade한다.
+        uniprot_set = {pid.upper() for pid in uniprot.pdb_ids}
+        try:
+            rcsb_ids = await search_pdb_ids_by_uniprot(uniprot.accession)
+        except RCSBSearchError:
+            rcsb_ids = []
+        rcsb_set = {pid.upper() for pid in rcsb_ids}
+        unindexed = sorted(rcsb_set - uniprot_set)
+        if unindexed:
+            uniprot.pdb_ids = sorted(uniprot_set | rcsb_set)
+
         if not uniprot.pdb_ids:
             rows.append(
                 f"| {target} | {uniprot.accession} | {type_label} | 0 | - | - |"
@@ -1586,6 +1599,15 @@ async def handle_compare_targets(arguments: dict) -> list[types.TextContent]:
                     f"{', '.join(failed_ids)}. 표시된 최고 해상도/최신 구조는 "
                     f"성공한 {len(structures)}개 기준입니다."
                 )
+        if unindexed:
+            # UniProt cross-reference에 아직 반영되지 않은 신규 구조 — RCSB Search로 보강한 부분
+            sample = ", ".join(unindexed[:3])
+            rest = len(unindexed) - 3
+            extra = f" 외 {rest}개" if rest > 0 else ""
+            details.append(
+                f"- **{target}** ({uniprot.accession}): 신규 {len(unindexed)}개 "
+                f"구조가 UniProt 미반영 (RCSB Search 직접 조회): {sample}{extra}"
+            )
 
     if not rows:
         return _text('비교할 타겟 목록을 입력해주세요. 예: ["EGFR", "HER2", "MET"]')
