@@ -68,6 +68,50 @@ def normalize_modality(raw: str | None) -> str | None:
     return MODALITY_MAP.get(raw.lower().strip(), raw.strip().capitalize())
 
 
+# --------------------------------------------------------------------------
+# GPCRdb 큐레이션 데이터의 잘못된 modality 라벨을 문헌 기준으로 교정한다.
+# - GPCRdb는 자체 큐레이션이지만 일부 화합물의 modality가 원논문과 불일치.
+# - PDBMCP는 외부 데이터를 그대로 노출하는 정책이지만, 명백히 검증된 mislabel에
+#   한해 큐레이션 override를 적용한다 (출처 DOI 명시 필수).
+# - 키는 ligand 일반명(resolve 후)을 lowercase + 공백 정리한 형태.
+# - 새 항목 추가 시 반드시 (corrected_modality, source_doi) 쌍으로 등록할 것.
+# --------------------------------------------------------------------------
+LIGAND_MODALITY_OVERRIDES: dict[str, tuple[str, str]] = {
+    # IHCH-7179: GPCRdb는 'Agonist'로 라벨링하지만 Chen et al. Cell 2024에서
+    # 5-HT2A에 대해 antagonist scaffold로 보고 (PDB 8JT8).
+    "ihch-7179": ("Antagonist", "10.1016/j.cell.2024.02.034"),
+    "(r)-ihch-7179": ("Antagonist", "10.1016/j.cell.2024.02.034"),
+    "r-ihch-7179": ("Antagonist", "10.1016/j.cell.2024.02.034"),
+}
+
+
+def apply_modality_override(
+    ligand: str | None, raw_modality: str | None
+) -> str | None:
+    """알려진 mislabel 케이스에 대해 modality를 문헌 기준으로 교정한다.
+
+    매칭이 없으면 raw_modality를 그대로 반환 (no-op).
+    """
+    if not ligand:
+        return raw_modality
+    key = ligand.lower().strip()
+    override = LIGAND_MODALITY_OVERRIDES.get(key)
+    if override:
+        return override[0]
+    return raw_modality
+
+
+def _apply_post_resolution_overrides(item: dict) -> None:
+    """Ligand name이 resolve된 후 적용하는 큐레이션 override (in-place).
+
+    `_resolve_ligand_names_for` 와 `get_gpcrdb_single` 두 경로에서 모두 호출되어
+    배치/단일 조회 결과가 동일한 교정을 받도록 보장한다.
+    """
+    item["ligand_modality"] = apply_modality_override(
+        item.get("ligand"), item.get("ligand_modality")
+    )
+
+
 # Gα 서브유닛 entry_name 접두사 → G단백질 패밀리 라벨
 _G_ALPHA_FAMILY: list[tuple[str, str]] = [
     ("gnas", "Gs"),
@@ -748,6 +792,8 @@ async def _resolve_ligand_names_for(
             item["ligand"] = None
         else:
             item["ligand"] = name  # str(일반명) 또는 None(미수록)
+        # Ligand 이름이 정해진 후 큐레이션 modality override 적용 (Bug 1)
+        _apply_post_resolution_overrides(item)
         result[pdb_id] = item
     return result
 
@@ -839,6 +885,8 @@ async def get_gpcrdb_single(pdb_id: str) -> dict | None:
                 return None
             item = _parse_structure_item(resp.json())
             item["ligand"] = await resolve_ligand_name(item.pop("_ligand_raw"), client)
+            # Ligand 이름이 정해진 후 큐레이션 modality override 적용 (Bug 1)
+            _apply_post_resolution_overrides(item)
             return item
     except Exception:
         return None

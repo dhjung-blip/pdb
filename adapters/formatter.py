@@ -158,9 +158,13 @@ def _render_markdown_family(result: DispatchResult) -> str:
         target = item["target"]
         res: SearchResult | None = item.get("result")
         if res is None:
-            err = item.get("error") or "조회 실패"
-            lines.append(f"| {target} | - | 조회 실패 | - | - | - | - |")
-            details.append(f"- **{target}**: {err}")
+            err = item.get("error")
+            fail_label = server.classify_search_failure(err)
+            lines.append(f"| {target} | - | {fail_label} | - | - | - | - |")
+            details.append(
+                f"- **{target}**: {err or '조회 실패'} "
+                f"잠시 후 다시 시도하거나 단일 검색(`/pdb search {target}`)으로 사유를 확인해보세요."
+            )
             continue
         type_label = "🧬 GPCR" if res.uniprot.is_gpcr else "일반"
         lines.append(

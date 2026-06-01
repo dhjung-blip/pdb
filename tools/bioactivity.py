@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import OrderedDict
 
 import httpx
 
@@ -27,6 +28,12 @@ IUPHAR_BASE = "https://www.guidetopharmacology.org/services"
 
 _TIMEOUT = httpx.Timeout(30.0)
 _semaphore = asyncio.Semaphore(5)
+
+# molecule_pref_name이 비어 있을 때 /molecule/{id}.json으로 보강한 결과를 캐싱.
+# 같은 호출 안에서 중복 활성에 동일 chembl_id가 여러 번 등장하므로 dedup 효과 큼.
+_MOLECULE_NAME_CACHE: "OrderedDict[str, str | None]" = OrderedDict()
+_MOLECULE_NAME_CACHE_MAX = 1024
+_MOLECULE_NAME_SENTINEL = object()
 
 
 class BioactivityAPIError(RuntimeError):
@@ -120,6 +127,115 @@ async def _chembl_activities(
     activities = data.get("activities") or []
     total = (data.get("page_meta") or {}).get("total_count", len(activities))
     return activities, total
+
+
+def _cache_get_molecule_name(chembl_id: str):
+    """캐시 lookup. hit이면 cached value 반환, miss면 sentinel 반환."""
+    if chembl_id in _MOLECULE_NAME_CACHE:
+        _MOLECULE_NAME_CACHE.move_to_end(chembl_id)
+        return _MOLECULE_NAME_CACHE[chembl_id]
+    return _MOLECULE_NAME_SENTINEL
+
+
+def _cache_put_molecule_name(chembl_id: str, name: str | None) -> None:
+    """캐시에 결과 저장 (None도 음의 캐시로 저장)."""
+    _MOLECULE_NAME_CACHE[chembl_id] = name
+    _MOLECULE_NAME_CACHE.move_to_end(chembl_id)
+    while len(_MOLECULE_NAME_CACHE) > _MOLECULE_NAME_CACHE_MAX:
+        _MOLECULE_NAME_CACHE.popitem(last=False)
+
+
+def clear_molecule_name_cache() -> None:
+    """테스트용 — 모듈 레벨 캐시 비우기."""
+    _MOLECULE_NAME_CACHE.clear()
+
+
+async def _chembl_molecule_name(
+    client: httpx.AsyncClient, chembl_id: str
+) -> str | None:
+    """ChEMBL `/molecule/{id}.json`에서 사람이 읽을 수 있는 이름 fallback 조회.
+
+    우선순위:
+    1. `pref_name` (대표 이름)
+    2. `molecule_synonyms[*].molecule_synonym` (별칭) 중 첫 번째
+
+    미수록(404) 또는 두 필드 모두 비어 있으면 None 반환.
+    일시 장애(타임아웃/5xx)는 None 반환하고 캐시하지 않음 — 다음 호출에서 재시도 가능.
+    """
+    if not chembl_id:
+        return None
+
+    cached = _cache_get_molecule_name(chembl_id)
+    if cached is not _MOLECULE_NAME_SENTINEL:
+        return cached  # type: ignore[return-value]
+
+    url = f"{CHEMBL_BASE}/molecule/{chembl_id}.json"
+    try:
+        async with _semaphore:
+            resp = await client.get(url, timeout=httpx.Timeout(10.0))
+        if resp.status_code == 404:
+            # 확정 미수록 — 음의 캐시
+            _cache_put_molecule_name(chembl_id, None)
+            return None
+        if resp.status_code != 200:
+            # 일시 장애 추정 — 캐시하지 않음
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        # 일시 장애 — 캐시하지 않음
+        return None
+
+    name = data.get("pref_name")
+    if not name:
+        syns = data.get("molecule_synonyms") or []
+        for s in syns:
+            if not isinstance(s, dict):
+                continue
+            cand = s.get("molecule_synonym") or s.get("synonym")
+            if cand:
+                name = cand
+                break
+
+    _cache_put_molecule_name(chembl_id, name)
+    return name
+
+
+async def _enrich_chembl_ligand_names(
+    client: httpx.AsyncClient, bioactivities: list[Bioactivity]
+) -> None:
+    """ChEMBL bioactivity 중 ligand_name이 비어 있는 항목을 보강 (in-place).
+
+    동일 chembl_id가 여러 활성에 등장할 수 있으므로 set으로 dedup 후 병렬 조회.
+    개별 lookup 실패는 silently None 유지.
+    """
+    missing_ids = sorted({
+        ba.ligand_chembl_id
+        for ba in bioactivities
+        if ba.source == "ChEMBL" and ba.ligand_name is None and ba.ligand_chembl_id
+    })
+    if not missing_ids:
+        return
+
+    tasks = [_chembl_molecule_name(client, mid) for mid in missing_ids]
+    fetched = await asyncio.gather(*tasks, return_exceptions=True)
+    names: dict[str, str | None] = {}
+    for mid, result in zip(missing_ids, fetched):
+        if isinstance(result, Exception):
+            names[mid] = None
+        else:
+            names[mid] = result  # type: ignore[assignment]
+
+    for ba in bioactivities:
+        if (
+            ba.source == "ChEMBL"
+            and ba.ligand_name is None
+            and ba.ligand_chembl_id
+        ):
+            resolved = names.get(ba.ligand_chembl_id)
+            # 최종 fallback: ChEMBL ID 그대로 — pref_name/synonym 둘 다 없는
+            # 도구화합물(high-throughput library 등)에서 빈 셀이 나오지 않게.
+            # 사용자는 ID로 ChEMBL 페이지를 클릭해 검증 가능.
+            ba.ligand_name = resolved or ba.ligand_chembl_id
 
 
 def _chembl_activity_to_model(activity: dict) -> Bioactivity:
@@ -352,6 +468,15 @@ async def fetch_target_bioactivities(
                 result.bioactivities.extend(
                     _chembl_activity_to_model(a) for a in activities
                 )
+                # ligand_name 보강 — activity 응답에서 molecule_pref_name이 비어 있는
+                # 항목을 /molecule/{id}.json으로 follow-up하여 채운다.
+                try:
+                    await _enrich_chembl_ligand_names(client, result.bioactivities)
+                except Exception as exc:  # noqa: BLE001 - 보강 실패는 fatal이 아님
+                    result.notes.append(
+                        f"⚠️ ChEMBL 리간드 이름 보강 중 일부 실패 — "
+                        f"일부 항목의 ligand_name이 비어 있을 수 있습니다. (사유: {exc})"
+                    )
                 result.total_count = total
                 result.sources["ChEMBL"] = (
                     f"https://www.ebi.ac.uk/chembl/explore/target/{tid}"

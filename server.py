@@ -92,6 +92,39 @@ def _md_escape(value: str) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
+def classify_search_failure(error: str | None) -> str:
+    """검색 실패 사유를 사용자가 알아볼 수 있는 라벨로 분류한다 (Bug 3).
+
+    family/compare에서 한 타깃의 실패가 어느 단계인지 표 셀에 명시하기 위해 사용.
+    매칭 규칙:
+    - "UniProt에서 찾지 못했습니다" → "UniProt 미수록"
+    - "UniProt 서버 응답이 지연" / 외부 API 연결 실패 → "UniProt 일시 장애"
+    - "PDB에 등록되어 있지 않습니다" → "PDB 구조 없음"
+    - "PDB 서버 응답이 지연" → "PDB API 일시 장애"
+    - 외부 API 연결 일반 → "외부 API 장애"
+    - 그 외 / None → "조회 실패"
+    """
+    if not error:
+        return "조회 실패"
+    s = error
+    # UniProt 단계 (search_uniprot의 메시지 패턴)
+    if "UniProt에서 찾지 못했습니다" in s or "찾지 못했습니다" in s:
+        return "UniProt 미수록"
+    if "UniProt 서버 응답이 지연" in s or ("UniProt" in s and "지연" in s):
+        return "UniProt 일시 장애"
+    # PDB 단계
+    if "PDB에 등록되어 있지 않습니다" in s:
+        return "PDB 구조 없음"
+    if "PDB 서버 응답이 지연" in s or ("PDB" in s and "지연" in s):
+        return "PDB API 일시 장애"
+    if "메타데이터" in s and ("조회하지 못했습니다" in s or "지연" in s):
+        return "PDB API 일시 장애"
+    # 네트워크 일반
+    if "네트워크 연결" in s or "외부 API" in s:
+        return "외부 API 장애"
+    return "조회 실패"
+
+
 def _display_path(path: str) -> str:
     """저장 경로를 사용자에게 보여줄 형태로 변환한다.
 
@@ -1189,8 +1222,12 @@ async def handle_search_family(arguments: dict) -> list[types.TextContent]:
             {"target": target, **shared_args}
         )
         if error or result is None:
-            rows.append(f"| {target} | - | 조회 실패 | - | - | - | - |")
-            details.append(f"- **{target}**: {error or '검색 결과를 만들지 못했습니다.'}")
+            fail_label = classify_search_failure(error)
+            rows.append(f"| {target} | - | {fail_label} | - | - | - | - |")
+            details.append(
+                f"- **{target}**: {error or '검색 결과를 만들지 못했습니다.'} "
+                f"잠시 후 다시 시도하거나 단일 검색(`search_target {target}`)으로 사유를 확인해보세요."
+            )
             continue
 
         results.append(result)
