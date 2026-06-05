@@ -31,7 +31,8 @@ _TIMEOUT = httpx.Timeout(15.0)
 _semaphore = asyncio.Semaphore(5)
 
 PUBCHEM_PROPS = (
-    "MolecularFormula,MolecularWeight,CanonicalSMILES,IsomericSMILES,"
+    "MolecularFormula,MolecularWeight,SMILES,ConnectivitySMILES,"
+    "CanonicalSMILES,IsomericSMILES,"
     "InChI,InChIKey,IUPACName,XLogP,HBondDonorCount,HBondAcceptorCount,"
     "TPSA,RotatableBondCount,Title"
 )
@@ -111,8 +112,18 @@ def _fill_from_pubchem(detail: LigandDetail, props: dict, synonyms: list[str]) -
     """PubChem property dict → LigandDetail 필드 채우기."""
     if not detail.common_name and props.get("Title"):
         detail.common_name = props.get("Title")
-    detail.canonical_smiles = detail.canonical_smiles or props.get("CanonicalSMILES")
-    detail.smiles = detail.smiles or props.get("IsomericSMILES") or props.get("CanonicalSMILES")
+    detail.canonical_smiles = (
+        detail.canonical_smiles
+        or props.get("ConnectivitySMILES")
+        or props.get("CanonicalSMILES")
+    )
+    detail.smiles = (
+        detail.smiles
+        or props.get("SMILES")
+        or props.get("IsomericSMILES")
+        or props.get("ConnectivitySMILES")
+        or props.get("CanonicalSMILES")
+    )
     detail.inchi = detail.inchi or props.get("InChI")
     detail.inchi_key = detail.inchi_key or props.get("InChIKey")
     detail.iupac_name = detail.iupac_name or props.get("IUPACName")

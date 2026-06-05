@@ -1,6 +1,6 @@
 {
   "name": "pdb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PDB 단백질 구조 검색·분석. 13개 외부 API(UniProt/RCSB/GPCRdb/PubChem/ChEMBL/Europe PMC/AlphaFold/OpenTargets)를 단일 슬래시 명령(/pdb)으로 노출. GPCR 약리학(State/Ligand modality/Signaling protein) 자동 분기 + Excel 표준 규격 동봉.",
   "author": {
     "name": "dhjung-blip",

@@ -175,7 +175,9 @@ async def fetch_sequence_region(
 # --------------------------------------------------------------------------
 
 _PROTEIN_VARIANT_DESC_RE = re.compile(
-    r"in\s+(?P<disease>[A-Z][A-Za-z0-9 ,\-]+?)(?:[;\.\)]|$)"
+    # 질환명 직후가 ' (약어)' 형태여도 첫 질환을 온전히 잡도록 종료 앵커에 '\s*\(' 추가.
+    # 예: "in EGFR-related lung cancer (EGFR); in ..." → "EGFR-related lung cancer"
+    r"in\s+(?P<disease>[A-Z][A-Za-z0-9 ,\-]+?)(?:\s*\(|[;\.\)]|$)"
 )
 
 

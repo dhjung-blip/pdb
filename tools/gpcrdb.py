@@ -51,9 +51,13 @@ RETRY_DELAY = 1.0
 # 리간드 modality 정규화 맵
 MODALITY_MAP = {
     "agonist": "Agonist",
+    "agonist (full)": "Agonist",
+    "full agonist": "Agonist",
     "partial agonist": "Partial agonist",
+    "agonist (partial)": "Partial agonist",
     "antagonist": "Antagonist",
     "inverse agonist": "Inverse agonist",
+    "agonist (inverse)": "Inverse agonist",
     "ago-antagonist": "Ago-antagonist",
     "positive allosteric modulator": "PAM",
     "negative allosteric modulator": "NAM",

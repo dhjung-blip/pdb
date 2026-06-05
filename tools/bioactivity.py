@@ -350,22 +350,53 @@ async def _iuphar_interactions(
 
 
 _AFFINITY_RE = re.compile(r"^(<|>|<=|>=|=)?\s*(-?\d+(?:\.\d+)?)$")
+_AFFINITY_RANGE_RE = re.compile(
+    r"^(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)$"
+)
+_SUP_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _parse_affinity_value(aff_str: str) -> tuple[str | None, float | None]:
+    """IUPHAR affinity 문자열 → (relation, pX 값).
+
+    단일 값('7.1', '>8.0')과 범위('7.4 - 9.2') 모두 인식한다.
+    범위는 중앙값을 채택해 min_pchembl 컷오프에서 누락되지 않게 한다.
+    파싱 실패 시 (None, None).
+    """
+    s = (aff_str or "").strip()
+    if not s:
+        return None, None
+    m = _AFFINITY_RE.match(s)
+    if m:
+        relation = m.group(1) or "="
+        try:
+            return relation, float(m.group(2))
+        except ValueError:
+            return None, None
+    rng = _AFFINITY_RANGE_RE.match(s)
+    if rng:
+        try:
+            low = float(rng.group(1))
+            high = float(rng.group(2))
+        except ValueError:
+            return None, None
+        return "=", (low + high) / 2.0
+    return None, None
+
+
+def _clean_ligand_name(name: str | None) -> str | None:
+    """IUPHAR ligandName에서 HTML 태그(<sup> 등)를 제거한다."""
+    if not name:
+        return None
+    cleaned = _SUP_TAG_RE.sub("", name).strip()
+    return cleaned or None
 
 
 def _iuphar_to_bioactivity(item: dict) -> Bioactivity | None:
     """IUPHAR interaction dict → Bioactivity (nM 단위 표준)."""
     aff_str = (item.get("affinity") or item.get("affinityHigh") or "").strip()
-    affinity_type = item.get("affinityType") or item.get("affinityParameter")
-    relation = None
-    pchembl = None
-    if aff_str:
-        m = _AFFINITY_RE.match(aff_str)
-        if m:
-            relation = m.group(1) or "="
-            try:
-                pchembl = float(m.group(2))  # IUPHAR는 pX 형태
-            except ValueError:
-                pchembl = None
+    affinity_type = item.get("affinityParameter") or item.get("affinityType")
+    relation, pchembl = _parse_affinity_value(aff_str)
 
     standard_value_nm = None
     if pchembl is not None:
@@ -383,7 +414,7 @@ def _iuphar_to_bioactivity(item: dict) -> Bioactivity | None:
     )
 
     return Bioactivity(
-        ligand_name=item.get("ligand"),
+        ligand_name=_clean_ligand_name(item.get("ligandName") or item.get("ligand")),
         ligand_chembl_id=None,
         target_chembl_id=None,
         standard_type=affinity_type,
