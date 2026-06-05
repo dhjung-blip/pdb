@@ -74,3 +74,15 @@ CLAUDE.md
 USAGE_GUIDE.md
 SYSTEM_PROMPT.md
 COVERAGE.md
+
+# --- 개발 하네스 (dev 전용, 배포 제외) — docs/decisions/0001-adopt-dev-harness.md ---
+docs/
+.importlinter
+ruff.toml
+mypy.ini
+.pre-commit-config.yaml
+requirements-dev.txt
+.claude/settings.json
+.claude/hooks/
+.claude/commands/
+.import_linter_cache/
