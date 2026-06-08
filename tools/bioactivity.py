@@ -59,7 +59,7 @@ async def _chembl_target_by_uniprot(
     그 외 HTTP/파싱 오류 → BioactivityAPIError 발생.
     """
     url = f"{CHEMBL_BASE}/target.json"
-    params = {
+    params: dict[str, str | int] = {
         "target_components__accession": accession,
         "limit": 1,
     }
@@ -93,9 +93,9 @@ async def _chembl_activities(
 ) -> tuple[list[dict], int]:
     """ChEMBL activity 목록을 가져온다. (활성 dict 리스트, 전체 카운트) 반환."""
     url = f"{CHEMBL_BASE}/activity.json"
-    params: dict[str, object] = {
+    params: dict[str, str | int] = {
         "target_chembl_id": target_chembl_id,
-        "limit": max(1, min(max_results, 100)),
+        "limit": max(1, min(max_results, 1000)),
     }
     if standard_types:
         params["standard_type__in"] = ",".join(standard_types)
@@ -148,6 +148,7 @@ def _cache_put_molecule_name(chembl_id: str, name: str | None) -> None:
 def clear_molecule_name_cache() -> None:
     """테스트용 — 모듈 레벨 캐시 비우기."""
     _MOLECULE_NAME_CACHE.clear()
+    _DOC_PMID_CACHE.clear()
 
 
 async def _chembl_molecule_name(
@@ -200,6 +201,60 @@ async def _chembl_molecule_name(
     return name
 
 
+# document_chembl_id → PMID 캐시 (ChEMBL activity 응답은 PMID를 직접 주지 않는다)
+_DOC_PMID_CACHE: "OrderedDict[str, str | None]" = OrderedDict()
+
+
+async def _chembl_document_pmid(client: httpx.AsyncClient, doc_id: str) -> str | None:
+    """ChEMBL `/document/{id}.json`에서 PMID 조회(캐시). 미수록/장애 시 None."""
+    if not doc_id:
+        return None
+    if doc_id in _DOC_PMID_CACHE:
+        _DOC_PMID_CACHE.move_to_end(doc_id)
+        return _DOC_PMID_CACHE[doc_id]
+    url = f"{CHEMBL_BASE}/document/{doc_id}.json"
+    try:
+        async with _semaphore:
+            resp = await client.get(url, timeout=httpx.Timeout(10.0))
+        if resp.status_code == 404:
+            _DOC_PMID_CACHE[doc_id] = None
+            return None
+        if resp.status_code != 200:
+            return None  # 일시 장애 — 캐시 안 함
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    pmid = data.get("pubmed_id")
+    pmid_str = str(pmid) if pmid else None
+    _DOC_PMID_CACHE[doc_id] = pmid_str
+    while len(_DOC_PMID_CACHE) > _MOLECULE_NAME_CACHE_MAX:
+        _DOC_PMID_CACHE.popitem(last=False)
+    return pmid_str
+
+
+async def _enrich_chembl_pmids(
+    client: httpx.AsyncClient, bioactivities: list[Bioactivity]
+) -> None:
+    """ChEMBL 행 중 PMID가 비고 document_chembl_id가 있는 항목을 보강(in-place)."""
+    missing = sorted({
+        ba.document_chembl_id
+        for ba in bioactivities
+        if ba.source == "ChEMBL" and not ba.pubmed_id and ba.document_chembl_id
+    })
+    if not missing:
+        return
+    fetched = await asyncio.gather(
+        *[_chembl_document_pmid(client, d) for d in missing],
+        return_exceptions=True,
+    )
+    pmids: dict[str, str | None] = {}
+    for d, r in zip(missing, fetched, strict=False):
+        pmids[d] = None if isinstance(r, Exception) else r  # type: ignore[assignment]
+    for ba in bioactivities:
+        if ba.source == "ChEMBL" and not ba.pubmed_id and ba.document_chembl_id:
+            ba.pubmed_id = pmids.get(ba.document_chembl_id)
+
+
 async def _enrich_chembl_ligand_names(
     client: httpx.AsyncClient, bioactivities: list[Bioactivity]
 ) -> None:
@@ -219,7 +274,7 @@ async def _enrich_chembl_ligand_names(
     tasks = [_chembl_molecule_name(client, mid) for mid in missing_ids]
     fetched = await asyncio.gather(*tasks, return_exceptions=True)
     names: dict[str, str | None] = {}
-    for mid, result in zip(missing_ids, fetched):
+    for mid, result in zip(missing_ids, fetched, strict=False):
         if isinstance(result, Exception):
             names[mid] = None
         else:
@@ -436,6 +491,34 @@ def _iuphar_to_bioactivity(item: dict) -> Bioactivity | None:
     )
 
 
+def _dedupe_by_ligand_type(bioactivities: list[Bioactivity]) -> list[Bioactivity]:
+    """같은 (ligand, source, standard_type)의 여러 측정치를 중앙값 대표 1건으로 축약.
+
+    같은 화합물의 중복·극단치가 표를 지배해 SAR 비교를 망치는 것을 막는다.
+    측정 타입(Ki/IC50/EC50 등)이 다르면 별도 행으로 유지(binding/functional 구분).
+    """
+    groups: "OrderedDict[tuple, list[Bioactivity]]" = OrderedDict()
+    for b in bioactivities:
+        ligand_key = b.ligand_chembl_id or (b.ligand_name or "").lower()
+        key = (ligand_key, b.source, (b.standard_type or "").upper())
+        groups.setdefault(key, []).append(b)
+    out: list[Bioactivity] = []
+    for grp in groups.values():
+        if len(grp) == 1:
+            out.append(grp[0])
+            continue
+        with_p = sorted(
+            (g for g in grp if g.pchembl_value is not None),
+            key=lambda g: g.pchembl_value or 0.0,
+        )
+        rep = with_p[len(with_p) // 2] if with_p else grp[0]
+        rep.assay_description = (
+            f"[{len(grp)}건 측정의 중앙값] {rep.assay_description or ''}".strip()
+        )
+        out.append(rep)
+    return out
+
+
 # --------------------------------------------------------------------------
 # 공개 API
 # --------------------------------------------------------------------------
@@ -464,21 +547,35 @@ async def fetch_target_bioactivities(
         gene_name=gene_symbol,
     )
     result.sources = {}
+    # dedup 재료 확보를 위해 max_results보다 넉넉히 가져온 뒤 축약한다.
+    pool = min(max(max_results * 8, 60), 300)
+    chembl_api_failed = False
 
-    async with httpx.AsyncClient(
-        timeout=_TIMEOUT, follow_redirects=True
-    ) as client:
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
         # ChEMBL — API 장애 시 notes에 명시적으로 기록하고 계속 진행
         try:
             target = await _chembl_target_by_uniprot(client, accession)
         except BioactivityAPIError as exc:
             target = None
+            chembl_api_failed = True
             result.notes.append(
                 f"⚠️ ChEMBL target 조회 일시 장애 — 활성 데이터가 누락될 수 있습니다. "
                 f"(사유: {exc}) AI 모델은 임의의 Ki/IC50 수치를 생성하지 마십시오."
             )
 
         if target:
+            # accession 교차검증 — ChEMBL이 요청과 다른 타깃을 매칭했는지 확인
+            comp_accs = {
+                (c.get("accession") or "").upper()
+                for c in (target.get("target_components") or [])
+                if isinstance(c, dict)
+            }
+            if comp_accs and accession not in comp_accs:
+                result.notes.append(
+                    f"⚠️ 요청 accession {accession}이(가) ChEMBL 타깃 "
+                    f"{target.get('target_chembl_id')}의 구성요소 accession"
+                    f"({', '.join(sorted(comp_accs))})와 일치하지 않습니다 — accession 표기를 확인하세요."
+                )
             tid = target.get("target_chembl_id")
             result.chembl_target_id = tid
             if tid:
@@ -488,7 +585,7 @@ async def fetch_target_bioactivities(
                         tid,
                         standard_types=standard_types,
                         min_pchembl=min_pchembl,
-                        max_results=max_results,
+                        max_results=pool,
                     )
                 except BioactivityAPIError as exc:
                     activities, total = [], 0
@@ -499,19 +596,15 @@ async def fetch_target_bioactivities(
                 result.bioactivities.extend(
                     _chembl_activity_to_model(a) for a in activities
                 )
-                # ligand_name 보강 — activity 응답에서 molecule_pref_name이 비어 있는
-                # 항목을 /molecule/{id}.json으로 follow-up하여 채운다.
-                try:
-                    await _enrich_chembl_ligand_names(client, result.bioactivities)
-                except Exception as exc:  # noqa: BLE001 - 보강 실패는 fatal이 아님
-                    result.notes.append(
-                        f"⚠️ ChEMBL 리간드 이름 보강 중 일부 실패 — "
-                        f"일부 항목의 ligand_name이 비어 있을 수 있습니다. (사유: {exc})"
-                    )
                 result.total_count = total
                 result.sources["ChEMBL"] = (
                     f"https://www.ebi.ac.uk/chembl/explore/target/{tid}"
                 )
+        elif not chembl_api_failed:
+            result.notes.append(
+                f"ChEMBL에 accession {accession}로 매칭되는 타깃이 없습니다 — "
+                f"accession 표기를 확인하거나 gene symbol로 IUPHAR를 조회하세요."
+            )
 
         if include_iuphar and gene_symbol:
             try:
@@ -534,7 +627,6 @@ async def fetch_target_bioactivities(
                         f"(사유: {exc})"
                     )
 
-                added = 0
                 for raw in interactions:
                     bio = _iuphar_to_bioactivity(raw)
                     if bio is None:
@@ -544,19 +636,27 @@ async def fetch_target_bioactivities(
                     ):
                         continue
                     result.bioactivities.append(bio)
-                    added += 1
-                    if added >= max_results:
-                        break
                 result.sources["IUPHAR/GtoPdb"] = (
                     f"https://www.guidetopharmacology.org/GRAC/ObjectDisplayForward?objectId={target_id}"
                 )
 
-    # 통합 정렬 — pChEMBL 내림차순, None은 뒤로
-    result.bioactivities.sort(
-        key=lambda b: (b.pchembl_value is None, -(b.pchembl_value or 0.0))
-    )
-    if max_results and len(result.bioactivities) > max_results:
-        result.bioactivities = result.bioactivities[:max_results]
+        # 같은 (ligand, type) 중복 측정 → 중앙값 대표 1건으로 축약 후
+        # pChEMBL 내림차순 정렬, distinct 리간드 max_results개로 절단
+        result.bioactivities = _dedupe_by_ligand_type(result.bioactivities)
+        result.bioactivities.sort(
+            key=lambda b: (b.pchembl_value is None, -(b.pchembl_value or 0.0))
+        )
+        if max_results and len(result.bioactivities) > max_results:
+            result.bioactivities = result.bioactivities[:max_results]
+
+        # 최종 표시 행에 대해서만 이름·PMID 보강(네트워크 절약)
+        try:
+            await _enrich_chembl_ligand_names(client, result.bioactivities)
+            await _enrich_chembl_pmids(client, result.bioactivities)
+        except Exception as exc:  # noqa: BLE001 - 보강 실패는 fatal이 아님
+            result.notes.append(
+                f"⚠️ ChEMBL 이름/PMID 보강 중 일부 실패 — 일부 셀이 비어 있을 수 있습니다. (사유: {exc})"
+            )
 
     return result
 

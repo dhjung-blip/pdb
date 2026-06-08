@@ -423,6 +423,19 @@ async def fetch_ligand_detail(query: str) -> LigandDetail:
             f"https://www.guidetopharmacology.org/GRAC/LigandDisplayForward?ligandId={detail.iuphar_ligand_id}"
         )
 
+    # no-match 가드 — 어디서도 식별자를 못 찾았으면 데이터 단계에서 note를 남겨
+    # JSON·Markdown 양쪽이 동일한 "찾지 못함" 경고를 갖게 한다(렌더러 의존 제거 → 핵심 할루시네이션 가드).
+    if (
+        detail.pubchem_cid is None
+        and detail.chembl_id is None
+        and detail.iuphar_ligand_id is None
+    ):
+        detail.notes.append(
+            f"'{q}'를 PubChem/ChEMBL/IUPHAR 어디에서도 찾지 못했습니다 — "
+            f"입력(이름/PDB 코드/ChEMBL ID/InChIKey) 표기를 확인하세요. "
+            f"AI 모델은 이 화합물의 SMILES/물성을 추측으로 채우지 마십시오."
+        )
+
     return detail
 
 

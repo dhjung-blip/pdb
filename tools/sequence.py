@@ -121,7 +121,7 @@ async def fetch_sequence_region(
             entry = await _fetch_entry(client, accession)
     except httpx.HTTPError as exc:
         raise SequenceError(
-            f"UniProt 서버 조회에 실패했습니다 ({exc})."
+            "UniProt 서열 조회에 실패했습니다 — accession 표기를 확인하거나 잠시 후 다시 시도해주세요."
         ) from exc
 
     sequence_full = (entry.get("sequence") or {}).get("value") or ""
@@ -140,8 +140,9 @@ async def fetch_sequence_region(
     region_seq = sequence_full[s - 1: e]
     full_returned = (s == 1 and e == full_length)
 
-    # Feature 추출
-    wanted_types = {t.lower() for t in (feature_types or [])}
+    # Feature 추출 — 사용자가 단축 코드(ACT_SITE/BINDING/TRANSMEM)를 줘도 현 UniProt
+    # REST long-name("Active site" 등)과 매칭되도록 정규화한다.
+    wanted_types = {_normalize_feature_type(t) for t in (feature_types or [])}
     features: list[SequenceFeature] = []
     for raw in entry.get("features") or []:
         feat = _parse_feature(raw)
@@ -168,6 +169,44 @@ async def fetch_sequence_region(
         features=features,
         source_url=f"https://www.uniprot.org/uniprotkb/{accession}/entry",
     )
+
+
+# UniProt 단축 코드(구 API/문서) → 현 REST API long-name. 사용자가 ACT_SITE 등을 줘도 매칭되게.
+_FEATURE_TYPE_ALIASES = {
+    "act_site": "active site",
+    "binding": "binding site",
+    "metal": "binding site",
+    "ca_bind": "binding site",
+    "np_bind": "binding site",
+    "dna_bind": "dna binding",
+    "transmem": "transmembrane",
+    "intramem": "intramembrane",
+    "topo_dom": "topological domain",
+    "signal": "signal",
+    "transit": "transit peptide",
+    "propep": "propeptide",
+    "carbohyd": "glycosylation",
+    "disulfid": "disulfide bond",
+    "mod_res": "modified residue",
+    "lipid": "lipidation",
+    "mutagen": "mutagenesis",
+    "variant": "natural variant",
+    "strand": "beta strand",
+    "helix": "helix",
+    "turn": "turn",
+}
+
+
+def _normalize_feature_type(t: str) -> str:
+    """사용자 입력 feature 타입을 현 UniProt REST long-name(소문자)으로 정규화.
+
+    단축 코드(ACT_SITE/BINDING/TRANSMEM 등)와 long-name("Active site") 양쪽을 받는다.
+    """
+    raw = t.strip().lower()
+    key = raw.replace(" ", "_").replace("-", "_")
+    if key in _FEATURE_TYPE_ALIASES:
+        return _FEATURE_TYPE_ALIASES[key]
+    return raw.replace("_", " ")
 
 
 # --------------------------------------------------------------------------
@@ -278,9 +317,17 @@ async def fetch_natural_variants(
                 )
             resp.raise_for_status()
             data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (400, 404, 422):
+            raise SequenceError(
+                f"'{accession}'에 대한 변이 데이터를 찾지 못했습니다 — accession 표기를 확인하세요."
+            ) from exc
+        raise SequenceError(
+            "UniProt Variation 서버 일시 장애로 조회하지 못했습니다. 잠시 후 다시 시도해주세요."
+        ) from exc
     except httpx.HTTPError as exc:
         raise SequenceError(
-            f"UniProt Variation API 조회에 실패했습니다 ({exc})."
+            "UniProt Variation 조회 연결에 실패했습니다. 네트워크 연결을 확인해주세요."
         ) from exc
 
     entry = data if isinstance(data, dict) else (data[0] if data else {})

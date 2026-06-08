@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,8 +20,8 @@ from models.schemas import (
     AlphaFoldModel,
     BindingSiteResult,
     LigandDetail,
-    PDBEntry,
     PaperAbstract,
+    PDBEntry,
     SearchResult,
     SequenceRegion,
     TargetBioactivities,
@@ -40,14 +39,13 @@ from tools.pdb import (
     fetch_all_pdb_entries_with_failures,
     fetch_single_pdb_entry,
 )
+from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.sequence import (
     SequenceError,
     fetch_natural_variants,
     fetch_sequence_region,
 )
-from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.uniprot import UniProtError, search_uniprot
-
 
 # --------------------------------------------------------------------------
 # 공통 반환 타입
@@ -345,7 +343,9 @@ async def run_bioactivity(args: argparse.Namespace) -> DispatchResult:
             exit_code=2,
         )
     gene_symbol = (getattr(args, "gene", None) or "").strip() or None
-    min_pchembl = getattr(args, "min_pchembl", None)
+    raw_min = getattr(args, "min_pchembl", None)
+    # 미지정(None)이면 문서화된 기본 6.0(≈1 µM) 적용. 명시적 0이면 컷오프 해제.
+    min_pchembl = 6.0 if raw_min is None else float(raw_min)
     max_results = getattr(args, "max", None) or 30
     include_iuphar = not bool(getattr(args, "no_iuphar", False))
     types = _split_csv(getattr(args, "types", None))
@@ -356,7 +356,7 @@ async def run_bioactivity(args: argparse.Namespace) -> DispatchResult:
             accession,
             gene_symbol=gene_symbol,
             standard_types=standard_types,
-            min_pchembl=float(min_pchembl) if min_pchembl is not None else None,
+            min_pchembl=min_pchembl,
             max_results=max_results,
             include_iuphar=include_iuphar,
         )

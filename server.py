@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -34,8 +34,8 @@ from models.schemas import (
     AlphaFoldModel,
     BindingSiteResult,
     LigandDetail,
-    PDBEntry,
     PaperAbstract,
+    PDBEntry,
     SearchResult,
     SequenceRegion,
     TargetBioactivities,
@@ -59,17 +59,16 @@ from tools.literature import LiteratureAPIError, fetch_paper_abstract, search_pa
 from tools.opentargets import OpenTargetsAPIError, fetch_target_intelligence
 from tools.parser import extract_antibody_from_title, extract_fusion_from_title
 from tools.pdb import (
-    fetch_all_pdb_entries,
     fetch_all_pdb_entries_with_failures,
     fetch_single_pdb_entry,
     format_method,
 )
+from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.sequence import (
     SequenceError,
     fetch_natural_variants,
     fetch_sequence_region,
 )
-from tools.rcsb_search import RCSBSearchError, search_pdb_ids_by_uniprot
 from tools.uniprot import UniProtError, search_uniprot
 
 server = Server("pdb-research-server")
@@ -999,6 +998,7 @@ async def _collect_target_search(
     gpcrdb_warning: str | None = None
     pubchem_failures = 0
     ligand_resolution_failures = 0
+    gpcr_demoted_no_data = False
     if is_gpcr and gpcrdb_slug:
         # 이 batch에서 발생한 장애를 집계하기 위해 사전에 누적치 초기화
         consume_pubchem_failures()
@@ -1015,6 +1015,7 @@ async def _collect_target_search(
             is_gpcr = False
             uniprot.is_gpcr = False
             uniprot.gpcrdb_slug = None
+            gpcr_demoted_no_data = True
 
     # STEP 5: RCSB PDB 메타데이터 병렬 조회 — 실패 ID도 함께 수집
     try:
@@ -1085,6 +1086,13 @@ async def _collect_target_search(
     # RCSB Search로 추가된 신규 구조(unindexed_ids)는 GPCRdb 미수록이 자연스러우므로
     # 분모에서 제외해 false-positive 경고를 줄인다.
     warnings: list[str] = []
+    if gpcr_demoted_no_data:
+        warnings.append(
+            "이 타깃은 이름상 GPCR로 추정되었으나 GPCRdb에서 0건이 응답되었습니다 "
+            "(일시 장애 또는 미수록 가능). State / Ligand modality / Signaling protein 등 "
+            "GPCR 확장 컬럼을 생략하고 기본 테이블로 표시했습니다 — "
+            "AI 모델은 이 정보를 외부 지식으로 추측 보완하지 마십시오."
+        )
     if is_gpcr and fetched_count > 0:
         unindexed_in_fetched = sum(1 for e in structures if e.pdb_id in set(unindexed_ids))
         denom = max(fetched_count - unindexed_in_fetched, 1)
@@ -1957,7 +1965,7 @@ def _render_paper(p: PaperAbstract) -> str:
         )
     if p.keywords:
         lines.append(
-            f"**Keywords**: " + ", ".join(p.keywords[:10])
+            "**Keywords**: " + ", ".join(p.keywords[:10])
         )
 
     if p.source_url:

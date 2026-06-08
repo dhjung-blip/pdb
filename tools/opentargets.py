@@ -75,7 +75,7 @@ query TargetIntel($id: String!) {
           name
           drugType
           mechanismsOfAction {
-            rows { mechanismOfAction actionType }
+            rows { mechanismOfAction actionType targets { id } }
           }
         }
         diseases {
@@ -90,12 +90,16 @@ query TargetIntel($id: String!) {
 
 # OpenTargets v4: maxClinicalStage 는 "PHASE_4" 같은 문자열로 내려옴.
 _PHASE_MAP = {
+    "APPROVAL": 4,  # OpenTargets는 승인 약물에 "APPROVAL"을 쓴다(= phase 4)
+    "APPROVED": 4,
     "PHASE_4": 4,
     "PHASE_3": 3,
+    "PHASE_2_3": 3,
     "PHASE_2": 2,
+    "PHASE_1_2": 2,
     "PHASE_1": 1,
-    "PRECLINICAL": 0,
     "EARLY_PHASE_1": 1,
+    "PRECLINICAL": 0,
 }
 
 
@@ -231,7 +235,6 @@ async def fetch_target_intelligence(
 
     drugs: list[KnownDrug] = []
     candidates = target.get("drugAndClinicalCandidates") or {}
-    seen_keys: set[tuple[str | None, str | None]] = set()
     for row in candidates.get("rows") or []:
         drug = row.get("drug") or {}
         drug_id = drug.get("id")
@@ -253,20 +256,22 @@ async def fetch_target_intelligence(
                     indication = src
                     break
 
-        # 대표 mechanism — 첫 row의 mechanismOfAction / actionType
+        # 대표 mechanism — 현재 타깃에 대한 MoA를 우선 선택(다른 타깃 MoA 오표기 방지)
         mech_text: str | None = None
         action_type: str | None = None
         mech_block = (drug.get("mechanismsOfAction") or {}).get("rows") or []
-        if mech_block:
+        for mrow in mech_block:
+            tids = {(t or {}).get("id") for t in (mrow.get("targets") or [])}
+            if ensembl_id in tids:
+                mech_text = mrow.get("mechanismOfAction")
+                action_type = mrow.get("actionType")
+                break
+        if mech_text is None and mech_block:
+            # 이 타깃에 특정된 MoA가 없으면 첫 MoA를 쓰되 타깃 불특정임을 표시
             mech_text = mech_block[0].get("mechanismOfAction")
             action_type = mech_block[0].get("actionType")
-
-        key = (drug_id, indication)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-
-        max_phase = _phase_to_int(row.get("maxClinicalStage"))
+            if mech_text:
+                mech_text = f"{mech_text} (타깃 불특정)"
 
         drugs.append(
             KnownDrug(
@@ -275,13 +280,29 @@ async def fetch_target_intelligence(
                 drug_type=drug.get("drugType"),
                 mechanism_of_action=mech_text,
                 action_type=action_type,
-                max_phase_for_indication=max_phase,
+                max_phase_for_indication=_phase_to_int(row.get("maxClinicalStage")),
                 indication=indication,
                 target_status=None,
             )
         )
-        if len(drugs) >= max_drugs:
+
+    # 승인약(phase 4)이 상단에 오도록 max_phase 내림차순 정렬 후 drug_id 기준 dedup
+    drugs.sort(
+        key=lambda d: (
+            d.max_phase_for_indication is None,
+            -(d.max_phase_for_indication or 0),
+        )
+    )
+    deduped: list[KnownDrug] = []
+    seen_ids: set[str | None] = set()
+    for d in drugs:
+        if d.drug_id in seen_ids:
+            continue
+        seen_ids.add(d.drug_id)
+        deduped.append(d)
+        if len(deduped) >= max_drugs:
             break
+    drugs = deduped
 
     return TargetIntelligence(
         target_query=target_query,

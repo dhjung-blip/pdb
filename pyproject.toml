@@ -1,6 +1,6 @@
 [project]
 name = "pdb-mcp-server"
-version = "0.1.1"
+version = "0.1.2"
 description = "PDB 연구 자동화 MCP 서버"
 requires-python = ">=3.11"
 dependencies = [

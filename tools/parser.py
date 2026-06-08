@@ -29,16 +29,18 @@ FUSION_PATTERNS: list[tuple[str, str]] = [
 
 # ── Antibody / 보조 단백질 패턴 ──
 # label이 None이면 매칭된 문자열을 그대로 사용한다.
+# 순서 주의: 단일사슬/단일도메인 등 **구체적인 단편 유형을 generic 'Fab'보다 먼저** 둔다.
+# (예: scFv16을 가진 구조가 Fab로 오분류되지 않도록 — scFv ≠ Fab)
 ANTIBODY_PATTERNS: list[tuple[str, str | None]] = [
-    (r"\b[\w-]+-Fab\b", None),                          # "P2C2-Fab" 등 → 그대로
-    (r"\bFab\d*\b", "Fab"),                             # "Fab", "Fab1"
     (r"single-chain\s+variable\s+fragment", "scFv"),
     (r"\bscFv\d*\b", "scFv"),                           # "scFv", "scFv16"
+    (r"\bNb\s?\d+\b", None),                            # "Nb35" 등 → 그대로(클론 보존)
     (r"\bnanobody\b", "Nanobody"),
-    (r"\bNb\s?\d+\b", None),                            # "Nb35" 등 → 그대로
+    (r"\bVHH\b", "Nanobody"),                           # VHH = 단일도메인 = nanobody
     (r"\bsybody\b", "Sybody"),
     (r"\bmegabody\b", "Megabody"),
-    (r"\bVHH\b", "VHH"),
+    (r"\b[\w-]+-Fab\b", None),                          # "P2C2-Fab" 등 → 그대로
+    (r"\bFab\d*\b", "Fab"),                             # "Fab", "Fab1"
     (r"\bantibody\b", "Antibody"),                      # 가장 일반적 — 마지막
 ]
 

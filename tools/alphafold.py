@@ -68,8 +68,12 @@ async def fetch_alphafold_model(uniprot_accession: str) -> AlphaFoldModel | None
             if resp.status_code == 404:
                 return None  # 미수록 (정상 케이스)
             if resp.status_code != 200:
+                if resp.status_code in (400, 422):
+                    raise AlphaFoldUnavailableError(
+                        f"'{accession}'에 대한 AlphaFold 모델을 찾지 못했습니다 — accession 표기를 확인하세요."
+                    )
                 raise AlphaFoldUnavailableError(
-                    f"AlphaFold API가 HTTP {resp.status_code}를 반환했습니다."
+                    f"AlphaFold API 일시 장애(HTTP {resp.status_code}) — 잠시 후 다시 시도해주세요."
                 )
             data = resp.json()
     except httpx.TimeoutException as exc:
@@ -78,11 +82,11 @@ async def fetch_alphafold_model(uniprot_accession: str) -> AlphaFoldModel | None
         ) from exc
     except httpx.HTTPError as exc:
         raise AlphaFoldUnavailableError(
-            f"AlphaFold API 연결 실패: {exc}"
+            "AlphaFold API 연결에 실패했습니다. 네트워크 연결을 확인해주세요."
         ) from exc
     except ValueError as exc:
         raise AlphaFoldUnavailableError(
-            f"AlphaFold API 응답 파싱 실패: {exc}"
+            "AlphaFold API 응답을 해석하지 못했습니다. 잠시 후 다시 시도해주세요."
         ) from exc
 
     items = data if isinstance(data, list) else [data]
