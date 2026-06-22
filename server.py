@@ -746,8 +746,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "결과 상한. 기본 30.",
-                        "default": 30,
+                        "description": "결과 상한(리간드·타입별 대표값으로 축약). 기본 50. 더 필요하면 올리세요.",
+                        "default": 50,
                     },
                     "include_iuphar": {
                         "type": "boolean",
@@ -781,8 +781,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "최대 결과 수 (1~25, 기본 5)",
-                        "default": 5,
+                        "description": "최대 결과 수 (1~25, 기본 10)",
+                        "default": 10,
                     },
                 },
                 "required": ["query"],
@@ -886,13 +886,13 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_diseases": {
                         "type": "integer",
-                        "description": "표시할 질환 수 (기본 15)",
-                        "default": 15,
+                        "description": "표시할 질환 수 (기본 25)",
+                        "default": 25,
                     },
                     "max_drugs": {
                         "type": "integer",
-                        "description": "표시할 known drugs 수 (기본 15)",
-                        "default": 15,
+                        "description": "표시할 known drugs 수 (기본 25)",
+                        "default": 25,
                     },
                 },
                 "required": ["target_query"],
@@ -1812,7 +1812,7 @@ async def handle_get_target_bioactivities(
     min_pchembl = _coerce_float(arguments.get("min_pchembl"))
     if min_pchembl == 0:
         min_pchembl = None
-    max_results = _coerce_int(arguments.get("max_results")) or 30
+    max_results = _coerce_int(arguments.get("max_results")) or 50
     include_iuphar = bool(arguments.get("include_iuphar", True))
     raw_types = arguments.get("standard_types")
     if isinstance(raw_types, list) and raw_types:
@@ -1846,8 +1846,13 @@ def _render_bioactivities(
     lines.append(f"- **IUPHAR target**: {r.iuphar_target_id or '-'}")
     if min_pchembl is not None:
         lines.append(f"- **pChEMBL 컷오프**: ≥ {min_pchembl}")
-    lines.append(f"- **ChEMBL 보고 총 활성**: {r.total_count}건 (필터 적용 전)")
-    lines.append(f"- **반환된 활성**: {len(r.bioactivities)}건")
+    lines.append(f"- **ChEMBL 매칭 활성**: {r.total_count}건 (min_pchembl 컷오프 적용 후)")
+    lines.append(f"- **표시된 활성**: {len(r.bioactivities)}건 (리간드·타입별 대표값으로 축약)")
+    if r.total_count and len(r.bioactivities) < r.total_count:
+        lines.append(
+            "  - ⓘ 더 받으려면 `max_results`를 올리거나 `min_pchembl`을 낮추세요 "
+            "(전체는 Excel 권장) — 표시되지 않은 활성이 더 있습니다."
+        )
 
     # API 장애 등 부분 실패가 있었으면 명시적으로 노출
     if r.notes:
@@ -1983,7 +1988,7 @@ async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
     if not query:
         return _text("검색 쿼리를 입력해주세요.")
 
-    max_results = _coerce_int(arguments.get("max_results")) or 5
+    max_results = _coerce_int(arguments.get("max_results")) or 10
     try:
         papers = await search_papers(query, max_results=max_results)
     except LiteratureAPIError as exc:
@@ -2150,6 +2155,8 @@ def _render_variants(
     if parts:
         lines.append(f"필터: {', '.join(parts)}")
     lines.append(f"반환된 변이: {len(v.variants)}건 (총 {v.total_count}건)")
+    if v.total_count and len(v.variants) < v.total_count:
+        lines.append("> ⓘ 표시되지 않은 변이가 더 있습니다 — max_results를 올리세요.")
 
     if not v.variants:
         lines.append("")
@@ -2304,8 +2311,8 @@ async def handle_get_target_intelligence(
     if not query:
         return _text("gene symbol 또는 Ensembl gene ID를 입력해주세요.")
 
-    max_diseases = _coerce_int(arguments.get("max_diseases")) or 15
-    max_drugs = _coerce_int(arguments.get("max_drugs")) or 15
+    max_diseases = _coerce_int(arguments.get("max_diseases")) or 25
+    max_drugs = _coerce_int(arguments.get("max_drugs")) or 25
 
     try:
         intel = await fetch_target_intelligence(
@@ -2336,7 +2343,11 @@ def _render_target_intel(t: TargetIntelligence) -> str:
 
     if t.diseases:
         lines.append("")
-        lines.append(f"### 연관 질환 상위 {len(t.diseases)}개 (종합 점수 내림차순)")
+        _td = t.disease_count or len(t.diseases)
+        _more_d = " · 더 보려면 max_diseases↑" if _td > len(t.diseases) else ""
+        lines.append(
+            f"### 연관 질환 — 총 {_td}건 중 {len(t.diseases)}개 표시 (점수 내림차순){_more_d}"
+        )
         lines.append("| # | Disease | EFO ID | Score | Therapeutic areas |")
         lines.append("|---|---------|--------|-------|-------------------|")
         for i, d in enumerate(t.diseases, 1):
@@ -2354,7 +2365,11 @@ def _render_target_intel(t: TargetIntelligence) -> str:
 
     if t.known_drugs:
         lines.append("")
-        lines.append(f"### Known drugs ({len(t.known_drugs)}건)")
+        _kd = t.known_drug_count or len(t.known_drugs)
+        _more_k = " · 더 보려면 max_drugs↑" if _kd > len(t.known_drugs) else ""
+        lines.append(
+            f"### Known drugs — 총 {_kd}건 중 {len(t.known_drugs)}건 표시{_more_k}"
+        )
         lines.append(
             "| Drug | Type | Mechanism | Max phase | Indication |"
         )

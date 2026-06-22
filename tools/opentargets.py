@@ -54,7 +54,7 @@ query TargetIntel($id: String!) {
     approvedName
     biotype
     proteinIds { id source }
-    associatedDiseases(page: { index: 0, size: 20 }) {
+    associatedDiseases(page: { index: 0, size: 30 }) {
       count
       rows {
         score
@@ -174,8 +174,8 @@ def _uniprot_from_protein_ids(protein_ids: list[dict] | None) -> str | None:
 async def fetch_target_intelligence(
     target_query: str,
     *,
-    max_diseases: int = 15,
-    max_drugs: int = 15,
+    max_diseases: int = 25,
+    max_drugs: int = 25,
 ) -> TargetIntelligence | None:
     """gene symbol(또는 Ensembl ID)로 OpenTargets 타깃 인텔리전스를 가져온다.
 
@@ -312,6 +312,8 @@ async def fetch_target_intelligence(
         biotype=target.get("biotype"),
         diseases=diseases,
         known_drugs=drugs,
+        disease_count=(target.get("associatedDiseases") or {}).get("count") or len(diseases),
+        known_drug_count=(target.get("drugAndClinicalCandidates") or {}).get("count") or len(drugs),
         source_url=f"https://platform.opentargets.org/target/{ensembl_id}",
     )
 

@@ -292,4 +292,6 @@ class TargetIntelligence(BaseModel):
     biotype: Optional[str] = None
     diseases: List[DiseaseAssociation] = Field(default_factory=list)
     known_drugs: List[KnownDrug] = Field(default_factory=list)
+    disease_count: int = 0  # OpenTargets가 보고한 연관 질환 총 수 (표시는 max_diseases개)
+    known_drug_count: int = 0  # known drug 후보 총 수 (표시는 max_drugs개, 중복 약물 통합)
     source_url: Optional[str] = None

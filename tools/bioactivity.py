@@ -529,7 +529,7 @@ async def fetch_target_bioactivities(
     gene_symbol: str | None = None,
     standard_types: tuple[str, ...] = DEFAULT_STANDARD_TYPES,
     min_pchembl: float | None = 6.0,
-    max_results: int = 30,
+    max_results: int = 50,
     include_iuphar: bool = True,
 ) -> TargetBioactivities:
     """타깃 UniProt accession으로 ChEMBL/IUPHAR 활성 데이터를 묶어서 반환.
