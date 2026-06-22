@@ -33,6 +33,12 @@ class PDBEntry(BaseModel):
     # RCSB polymer entity 설명 목록 (Fusion protein / Antibody 추출용)
     polymer_descriptions: List[str] = Field(default_factory=list)
 
+    # ── 구조 품질(QC) 필드 (get_pdb_detail 심화용 — 검색 표엔 미표시) ──
+    r_work: Optional[float] = None  # X-ray 정밀화 R-work
+    r_free: Optional[float] = None  # X-ray 정밀화 R-free (모델 품질 핵심 지표)
+    assembly_count: Optional[int] = None  # 생물학적 assembly 수
+    deposited_chain_count: Optional[int] = None  # 침착된 polymer chain 수 (올리고머 규모)
+
     # ── GPCR 확장 필드 (GPCR 타깃일 때만 채워짐, 아니면 None) ──
     pref_chain: Optional[str] = None  # 예: "A"
     state: Optional[str] = None  # "Active" | "Inactive" | "Intermediate"

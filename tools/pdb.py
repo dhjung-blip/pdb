@@ -34,6 +34,12 @@ query GetPDBEntry($id: String!) {
     rcsb_entry_info {
       resolution_combined
       experimental_method
+      assembly_count
+      deposited_polymer_entity_instance_count
+    }
+    refine {
+      ls_R_factor_R_work
+      ls_R_factor_R_free
     }
     rcsb_accession_info {
       initial_release_date
@@ -78,6 +84,14 @@ def format_method(method: str | None) -> str:
     if "ELECTRON CRYSTALLOGRAPHY" in m:
         return "Electron Crystallography"
     return method.title()
+
+
+def _safe_float(value) -> float | None:
+    """안전 float 변환 — None/비수치는 None."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_citation(citations: list[dict]) -> Citation | None:
@@ -156,6 +170,12 @@ def _parse_entry(pdb_id: str, entry: dict) -> PDBEntry:
 
     citation = _parse_citation(entry.get("citation") or [])
 
+    # 구조 품질(QC) — X-ray refine R-factor (refine는 리스트; EM/NMR은 null)
+    refine_list = entry.get("refine") or []
+    rf = refine_list[0] if refine_list else {}
+    r_work = _safe_float((rf or {}).get("ls_R_factor_R_work"))
+    r_free = _safe_float((rf or {}).get("ls_R_factor_R_free"))
+
     return PDBEntry(
         pdb_id=pdb_id,
         resolution=resolution,
@@ -164,6 +184,10 @@ def _parse_entry(pdb_id: str, entry: dict) -> PDBEntry:
         title=title,
         polymer_descriptions=polymer_descriptions,
         citation=citation,
+        r_work=r_work,
+        r_free=r_free,
+        assembly_count=info.get("assembly_count"),
+        deposited_chain_count=info.get("deposited_polymer_entity_instance_count"),
     )
 
 
@@ -230,7 +254,7 @@ async def fetch_all_pdb_entries_with_failures(
 
     entries: list[PDBEntry] = []
     failed: list[str] = []
-    for pid, r in zip(pdb_ids, results):
+    for pid, r in zip(pdb_ids, results, strict=False):
         if isinstance(r, PDBEntry):
             entries.append(r)
         else:

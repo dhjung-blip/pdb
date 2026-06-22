@@ -401,7 +401,8 @@ _GET_PDB_DETAIL_DESCRIPTION = """\
 [출력]
 GPCR 구조: Resolution / Method / Released Date / State / Ligand /
             Ligand modality / Signaling protein / Fusion / Antibody / 논문 전체
-비GPCR 구조: Resolution / Method / Released Date / 논문 전체"""
+비GPCR 구조: Resolution / Method / Released Date / 논문 전체
+구조 품질·구성(공통): R-free·R-work(X-ray refine) / assembly 수 / polymer chain 수"""
 
 
 # --------------------------------------------------------------------------
@@ -1516,6 +1517,19 @@ def _render_pdb_detail(entry: PDBEntry) -> str:
     lines.append(f"**실험 방법**: {format_method(entry.method)}{method_raw}  ")
     lines.append(f"**공개일(Released Date)**: {entry.released_date or '-'}  ")
     lines.append(f"**RCSB 페이지**: https://www.rcsb.org/structure/{entry.pdb_id}")
+
+    # 구조 품질·구성(QC) — 값이 있을 때만 (X-ray는 R-free/R-work, EM·NMR은 생략)
+    qc: list[str] = []
+    if entry.r_free is not None:
+        qc.append(f"R-free {entry.r_free:.3f}")
+    if entry.r_work is not None:
+        qc.append(f"R-work {entry.r_work:.3f}")
+    if entry.assembly_count:
+        qc.append(f"assembly {entry.assembly_count}개")
+    if entry.deposited_chain_count:
+        qc.append(f"polymer chain {entry.deposited_chain_count}개")
+    if qc:
+        lines.append(f"**구조 품질·구성**: {' · '.join(qc)}")
 
     if entry.is_gpcr:
         lines.append("")
