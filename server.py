@@ -402,7 +402,8 @@ _GET_PDB_DETAIL_DESCRIPTION = """\
 GPCR 구조: Resolution / Method / Released Date / State / Ligand /
             Ligand modality / Signaling protein / Fusion / Antibody / 논문 전체
 비GPCR 구조: Resolution / Method / Released Date / 논문 전체
-구조 품질·구성(공통): R-free·R-work(X-ray refine) / assembly 수 / polymer chain 수"""
+구조 품질·구성(공통): R-free·R-work(X-ray refine) / assembly 수 / polymer chain 수
+결합 리간드(ref 화합물): 버퍼/이온 제외한 결합 화합물 + RCSB 보고 binding affinity"""
 
 
 # --------------------------------------------------------------------------
@@ -1505,6 +1506,33 @@ async def handle_get_pdb_detail(arguments: dict) -> list[types.TextContent]:
     return _text(_render_pdb_detail(entry))
 
 
+def _summarize_binding_affinity(affs: list[dict]) -> str:
+    """RCSB binding affinity 목록을 type별 중앙값+건수로 요약(HTML 엔티티 해제)."""
+    import html as _html
+
+    grouped: dict[tuple, list[float]] = {}
+    prov = ""
+    for a in affs:
+        prov = prov or (a.get("provenance") or "")
+        v = a.get("value")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        t = _html.unescape(str(a.get("type") or "?"))
+        grouped.setdefault((t, a.get("unit") or ""), []).append(fv)
+    parts = []
+    for (t, unit), vals in grouped.items():
+        vals.sort()
+        med = vals[len(vals) // 2]
+        suffix = f" ×{len(vals)}건" if len(vals) > 1 else ""
+        parts.append(f"{t} {med:.3g} {unit}{suffix}".strip())
+    out = ", ".join(parts)
+    return f"{out} ({prov})" if prov else out
+
+
 def _render_pdb_detail(entry: PDBEntry) -> str:
     lines: list[str] = []
     header = f"## PDB {entry.pdb_id} — 상세 정보"
@@ -1532,6 +1560,26 @@ def _render_pdb_detail(entry: PDBEntry) -> str:
         qc.append(f"polymer chain {entry.deposited_chain_count}개")
     if qc:
         lines.append(f"**구조 품질·구성**: {' · '.join(qc)}")
+
+    # 결합 리간드(ref 화합물) + RCSB 보고 binding affinity (P3)
+    if entry.ligands:
+        lines.append("")
+        lines.append("### 결합 리간드 (ref 화합물)")
+        aff_by_comp: dict = {}
+        for a in entry.binding_affinities:
+            aff_by_comp.setdefault(a.get("comp_id"), []).append(a)
+        for lig in entry.ligands:
+            cid = lig.get("id")
+            row = f"- **{cid}** — {lig.get('name') or '-'}"
+            affs = aff_by_comp.get(cid) or []
+            if affs:
+                row += f"  · 결합활성: {_summarize_binding_affinity(affs)}"
+            row += f"  · [리간드 상세](https://www.rcsb.org/ligand/{cid})"
+            lines.append(row)
+        lines.append(
+            "  ⓘ 화합물 물성/known inhibitor 활성은 `get_ligand_detail`(이름·ID) 또는 "
+            "`get_target_bioactivities`(타깃)로 확인."
+        )
 
     if entry.is_gpcr:
         lines.append("")

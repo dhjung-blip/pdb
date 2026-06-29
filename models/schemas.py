@@ -39,6 +39,12 @@ class PDBEntry(BaseModel):
     assembly_count: Optional[int] = None  # 생물학적 assembly 수
     deposited_chain_count: Optional[int] = None  # 침착된 polymer chain 수 (올리고머 규모)
 
+    # ── 결합 리간드(ref 화합물) — get_pdb_detail 심화 (P3); 버퍼/이온 제외 ──
+    ligands: List[dict] = Field(default_factory=list)  # [{"id","name"}]
+    binding_affinities: List[dict] = Field(
+        default_factory=list
+    )  # RCSB 보고 [{"comp_id","type","value","unit","provenance"}]
+
     # ── GPCR 확장 필드 (GPCR 타깃일 때만 채워짐, 아니면 None) ──
     pref_chain: Optional[str] = None  # 예: "A"
     state: Optional[str] = None  # "Active" | "Inactive" | "Intermediate"
