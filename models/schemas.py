@@ -120,6 +120,7 @@ class Bioactivity(BaseModel):
 
     ligand_name: Optional[str] = None
     ligand_chembl_id: Optional[str] = None
+    smiles: Optional[str] = None  # 이름 없는 소스(BindingDB) 식별 + 크로스소스 중복통합용
     target_chembl_id: Optional[str] = None
     standard_type: Optional[str] = None  # Ki / Kd / IC50 / EC50
     standard_relation: Optional[str] = None  # "=" / "<" / ">"
@@ -130,7 +131,7 @@ class Bioactivity(BaseModel):
     assay_description: Optional[str] = None
     document_chembl_id: Optional[str] = None
     pubmed_id: Optional[str] = None
-    source: str = "ChEMBL"  # "ChEMBL" | "IUPHAR"
+    source: str = "ChEMBL"  # "ChEMBL" | "IUPHAR" | "BindingDB"
     source_url: Optional[str] = None
 
 
@@ -145,6 +146,7 @@ class TargetBioactivities(BaseModel):
     bioactivities: List[Bioactivity] = Field(default_factory=list)
     total_count: int = 0  # 필터링 전 ChEMBL이 보고한 활성 총 개수
     sources: dict = Field(default_factory=dict)
+    source_counts: dict = Field(default_factory=dict)  # 소스별 수집 건수(절단 전) — 투명성
     notes: List[str] = Field(default_factory=list)
 
 

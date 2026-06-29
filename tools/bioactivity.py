@@ -22,6 +22,7 @@ from collections import OrderedDict
 import httpx
 
 from models.schemas import Bioactivity, TargetBioactivities
+from tools.bindingdb import BindingDBUnavailable, fetch_bindingdb_by_uniprot
 
 CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data"
 IUPHAR_BASE = "https://www.guidetopharmacology.org/services"
@@ -499,7 +500,7 @@ def _dedupe_by_ligand_type(bioactivities: list[Bioactivity]) -> list[Bioactivity
     """
     groups: "OrderedDict[tuple, list[Bioactivity]]" = OrderedDict()
     for b in bioactivities:
-        ligand_key = b.ligand_chembl_id or (b.ligand_name or "").lower()
+        ligand_key = b.ligand_chembl_id or b.smiles or (b.ligand_name or "").lower()
         key = (ligand_key, b.source, (b.standard_type or "").upper())
         groups.setdefault(key, []).append(b)
     out: list[Bioactivity] = []
@@ -531,6 +532,7 @@ async def fetch_target_bioactivities(
     min_pchembl: float | None = 6.0,
     max_results: int = 50,
     include_iuphar: bool = True,
+    include_bindingdb: bool = True,
 ) -> TargetBioactivities:
     """타깃 UniProt accession으로 ChEMBL/IUPHAR 활성 데이터를 묶어서 반환.
 
@@ -639,6 +641,42 @@ async def fetch_target_bioactivities(
                 result.sources["IUPHAR/GtoPdb"] = (
                     f"https://www.guidetopharmacology.org/GRAC/ObjectDisplayForward?objectId={target_id}"
                 )
+
+        # BindingDB — ChEMBL/IUPHAR가 놓치는 특허·문헌 유래 활성을 보강(완전성).
+        # accession만으로 독립 조회되므로 ChEMBL 장애 시에도 동작한다.
+        # 대형 타깃(EGFR 등)은 504로 응답 → graceful 생략하고 notes에 기록.
+        if include_bindingdb:
+            # min_pchembl(있으면) → nM 컷오프(6.0→1µM). 없으면 100µM까지 '전량 수집'.
+            cutoff_nm = (
+                int(10 ** (9 - min_pchembl)) if min_pchembl is not None else 100000
+            )
+            cutoff_nm = max(1, min(cutoff_nm, 100000))
+            try:
+                bdb_rows = await fetch_bindingdb_by_uniprot(
+                    client, accession, cutoff_nm=cutoff_nm
+                )
+            except BindingDBUnavailable as exc:
+                bdb_rows = []
+                result.notes.append(
+                    f"⚠️ BindingDB 생략 — {exc} (ChEMBL/IUPHAR 결과만 표시)"
+                )
+            else:
+                if min_pchembl is not None:
+                    bdb_rows = [
+                        b
+                        for b in bdb_rows
+                        if b.pchembl_value is not None and b.pchembl_value >= min_pchembl
+                    ]
+                result.bioactivities.extend(bdb_rows)
+                if bdb_rows:
+                    result.sources["BindingDB"] = (
+                        f"https://www.bindingdb.org/rest/getLigandsByUniprot"
+                        f"?uniprot={accession};{cutoff_nm}&response=application/json"
+                    )
+
+        # 소스별 수집 건수(dedup·절단 전) 기록 — 출력 투명성용
+        for _b in result.bioactivities:
+            result.source_counts[_b.source] = result.source_counts.get(_b.source, 0) + 1
 
         # 같은 (ligand, type) 중복 측정 → 중앙값 대표 1건으로 축약 후
         # pChEMBL 내림차순 정렬, distinct 리간드 max_results개로 절단

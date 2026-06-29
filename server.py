@@ -429,8 +429,9 @@ PubChem CID / ChEMBL ID / IUPHAR ID / SMILES / InChI / MW / LogP /
 H-bond donors·acceptors / TPSA / 신약 phase / synonyms + 출처 URL"""
 
 _GET_TARGET_BIOACTIVITIES_DESCRIPTION = """\
-특정 타깃에 대한 화합물 활성 데이터(Ki / Kd / IC50 / EC50)를 ChEMBL과 IUPHAR에서
-가져옵니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
+특정 타깃에 대한 화합물 활성 데이터(Ki / Kd / IC50 / EC50)를 ChEMBL·IUPHAR·BindingDB에서
+통합 수집합니다. 소스별 수집 건수와 미포함 소스(SciFinder 등)를 함께 표시해 '전량 여부'를
+투명하게 알립니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
 
 [자동 호출 조건]
 - "HTR2A 에 대한 risperidone Ki 알려줘"
@@ -1860,13 +1861,35 @@ def _render_bioactivities(
     lines.append(f"- **IUPHAR target**: {r.iuphar_target_id or '-'}")
     if min_pchembl is not None:
         lines.append(f"- **pChEMBL 컷오프**: ≥ {min_pchembl}")
-    lines.append(f"- **ChEMBL 매칭 활성**: {r.total_count}건 (min_pchembl 컷오프 적용 후)")
+
+    # 수집 소스 분해 (dedup·절단 전) — 연구원 '전량인지' 의문 해소
+    collected = sum(r.source_counts.values()) if r.source_counts else r.total_count
+    if r.source_counts:
+        breakdown = " · ".join(
+            f"{s} {n}건"
+            for s, n in sorted(r.source_counts.items(), key=lambda x: -x[1])
+        )
+        lines.append(f"- **수집 소스 분해**: {breakdown} (합 {collected}건, dedup·절단 전)")
+        chembl_got = r.source_counts.get("ChEMBL", 0)
+        if r.total_count and r.total_count > chembl_got:
+            lines.append(
+                f"  - ⓘ ChEMBL은 매칭 {r.total_count}건 중 {chembl_got}건만 수집(pool 한도) "
+                "— 전수는 `max_results`↑ 또는 Excel."
+            )
     lines.append(f"- **표시된 활성**: {len(r.bioactivities)}건 (리간드·타입별 대표값으로 축약)")
-    if r.total_count and len(r.bioactivities) < r.total_count:
+    if collected and len(r.bioactivities) < collected:
         lines.append(
             "  - ⓘ 더 받으려면 `max_results`를 올리거나 `min_pchembl`을 낮추세요 "
             "(전체는 Excel 권장) — 표시되지 않은 활성이 더 있습니다."
         )
+
+    # 수집 범위 투명성 — 무엇을 보고/안 보는지 (연구원 '완전성' 의문 대응)
+    queried = " · ".join(r.source_counts.keys()) if r.source_counts else "없음"
+    lines.append(
+        f"- **수집 범위**: 수집 소스 = {queried}. "
+        "미포함 = SciFinder(CAS 유료 — API 불가) · 특허 전수(BindingDB/ChEMBL 경유 일부만) · "
+        "PubChem BioAssay. → '전량'이 아니라 **위 소스 한정 수집**입니다."
+    )
 
     # API 장애 등 부분 실패가 있었으면 명시적으로 노출
     if r.notes:
@@ -1895,9 +1918,17 @@ def _render_bioactivities(
                 if b.standard_value is not None
                 else "-"
             )
+            # 이름 없는 소스(BindingDB)는 SMILES로 식별 + monomer 링크
+            if b.ligand_name:
+                ligand_disp = _md_escape(b.ligand_name)
+            elif b.smiles:
+                sm = _md_escape(_trim(b.smiles, 28))
+                ligand_disp = f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
+            else:
+                ligand_disp = "-"
             lines.append(
                 f"| {i} "
-                f"| {_md_escape(b.ligand_name or '-')} "
+                f"| {ligand_disp} "
                 f"| {b.standard_type or '-'} "
                 f"| {val} "
                 f"| {b.standard_units or '-'} "
