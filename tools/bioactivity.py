@@ -26,6 +26,7 @@ from tools.bindingdb import BindingDBUnavailable, fetch_bindingdb_by_uniprot
 
 CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data"
 IUPHAR_BASE = "https://www.guidetopharmacology.org/services"
+PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 
 _TIMEOUT = httpx.Timeout(30.0)
 _semaphore = asyncio.Semaphore(5)
@@ -128,6 +129,33 @@ async def _chembl_activities(
     activities = data.get("activities") or []
     total = (data.get("page_meta") or {}).get("total_count", len(activities))
     return activities, total
+
+
+async def _chembl_functional_activities(
+    client: httpx.AsyncClient, target_chembl_id: str, *, limit: int = 15
+) -> list[Bioactivity]:
+    """단일농도 기능 활성(% Inhibition / Residual activity) 조회.
+
+    pChEMBL이 없는 스크리닝 readout이라 affinity 표와 별도 그룹으로 표시한다.
+    실패/미수록 시 빈 리스트.
+    """
+    try:
+        async with _semaphore:
+            resp = await client.get(
+                f"{CHEMBL_BASE}/activity.json",
+                params={
+                    "target_chembl_id": target_chembl_id,
+                    "standard_type__in": "Inhibition,Residual activity",
+                    "limit": max(1, min(limit, 100)),
+                    "order_by": "-standard_value",
+                },
+            )
+        if resp.status_code != 200:
+            return []
+        acts = resp.json().get("activities") or []
+    except (httpx.HTTPError, ValueError):
+        return []
+    return [_chembl_activity_to_model(a) for a in acts]
 
 
 def _cache_get_molecule_name(chembl_id: str):
@@ -240,7 +268,7 @@ async def _enrich_chembl_pmids(
     missing = sorted({
         ba.document_chembl_id
         for ba in bioactivities
-        if ba.source == "ChEMBL" and not ba.pubmed_id and ba.document_chembl_id
+        if not ba.pubmed_id and ba.document_chembl_id  # 병합 행(BindingDB+ChEMBL) 포함
     })
     if not missing:
         return
@@ -252,7 +280,7 @@ async def _enrich_chembl_pmids(
     for d, r in zip(missing, fetched, strict=False):
         pmids[d] = None if isinstance(r, Exception) else r  # type: ignore[assignment]
     for ba in bioactivities:
-        if ba.source == "ChEMBL" and not ba.pubmed_id and ba.document_chembl_id:
+        if not ba.pubmed_id and ba.document_chembl_id:
             ba.pubmed_id = pmids.get(ba.document_chembl_id)
 
 
@@ -267,7 +295,7 @@ async def _enrich_chembl_ligand_names(
     missing_ids = sorted({
         ba.ligand_chembl_id
         for ba in bioactivities
-        if ba.source == "ChEMBL" and ba.ligand_name is None and ba.ligand_chembl_id
+        if ba.ligand_name is None and ba.ligand_chembl_id  # 병합 행(BindingDB+ChEMBL) 포함
     })
     if not missing_ids:
         return
@@ -282,16 +310,107 @@ async def _enrich_chembl_ligand_names(
             names[mid] = result  # type: ignore[assignment]
 
     for ba in bioactivities:
-        if (
-            ba.source == "ChEMBL"
-            and ba.ligand_name is None
-            and ba.ligand_chembl_id
-        ):
+        if ba.ligand_name is None and ba.ligand_chembl_id:
             resolved = names.get(ba.ligand_chembl_id)
             # 최종 fallback: ChEMBL ID 그대로 — pref_name/synonym 둘 다 없는
             # 도구화합물(high-throughput library 등)에서 빈 셀이 나오지 않게.
             # 사용자는 ID로 ChEMBL 페이지를 클릭해 검증 가능.
             ba.ligand_name = resolved or ba.ligand_chembl_id
+
+
+# ── 크로스소스 중복통합용 InChIKey 해석 (ChEMBL 배치 + BindingDB→PubChem) ──────
+_INCHIKEY_CACHE: "OrderedDict[str, str | None]" = OrderedDict()  # chembl_id → inchikey
+_PUBCHEM_IK_CACHE: "OrderedDict[str, str | None]" = OrderedDict()  # smiles → inchikey
+
+
+async def _enrich_chembl_inchikeys(
+    client: httpx.AsyncClient, rows: list[Bioactivity]
+) -> None:
+    """ChEMBL 행에 standard_inchi_key를 배치로 보강(in-place). 크로스소스 병합 키."""
+    ids = sorted({
+        b.ligand_chembl_id
+        for b in rows
+        if b.source == "ChEMBL" and b.inchikey is None and b.ligand_chembl_id
+    })
+    pending = [i for i in ids if i not in _INCHIKEY_CACHE]
+    for start in range(0, len(pending), 50):
+        chunk = pending[start : start + 50]
+        try:
+            async with _semaphore:
+                resp = await client.get(
+                    f"{CHEMBL_BASE}/molecule.json",
+                    params={
+                        "molecule_chembl_id__in": ",".join(chunk),
+                        "only": "molecule_chembl_id,molecule_structures",
+                        "limit": len(chunk),
+                    },
+                )
+            if resp.status_code != 200:
+                continue
+            for m in resp.json().get("molecules") or []:
+                cid = m.get("molecule_chembl_id")
+                struct = m.get("molecule_structures") or {}
+                if cid:
+                    _INCHIKEY_CACHE[cid] = struct.get("standard_inchi_key")
+        except (httpx.HTTPError, ValueError):
+            continue
+    while len(_INCHIKEY_CACHE) > _MOLECULE_NAME_CACHE_MAX:
+        _INCHIKEY_CACHE.popitem(last=False)
+    for b in rows:
+        if b.source == "ChEMBL" and b.inchikey is None and b.ligand_chembl_id:
+            b.inchikey = _INCHIKEY_CACHE.get(b.ligand_chembl_id)
+
+
+async def _pubchem_inchikey(client: httpx.AsyncClient, smiles: str) -> str | None:
+    """PubChem로 SMILES→InChIKey 해석(캐시). 실패 시 None."""
+    if not smiles:
+        return None
+    if smiles in _PUBCHEM_IK_CACHE:
+        _PUBCHEM_IK_CACHE.move_to_end(smiles)
+        return _PUBCHEM_IK_CACHE[smiles]
+    ik: str | None = None
+    try:
+        async with _semaphore:
+            resp = await client.post(
+                f"{PUBCHEM_BASE}/compound/smiles/property/InChIKey/JSON",
+                data={"smiles": smiles},
+                timeout=httpx.Timeout(15.0),
+            )
+        if resp.status_code == 200:
+            props = (resp.json().get("PropertyTable") or {}).get("Properties") or []
+            if props:
+                ik = props[0].get("InChIKey") or None
+    except (httpx.HTTPError, ValueError):
+        ik = None
+    _PUBCHEM_IK_CACHE[smiles] = ik
+    while len(_PUBCHEM_IK_CACHE) > _MOLECULE_NAME_CACHE_MAX:
+        _PUBCHEM_IK_CACHE.popitem(last=False)
+    return ik
+
+
+async def _enrich_bindingdb_inchikeys(
+    client: httpx.AsyncClient, rows: list[Bioactivity], *, cap: int = 120
+) -> None:
+    """BindingDB 행(SMILES만 있음)에 PubChem InChIKey 보강(in-place). 최대 cap개."""
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for b in rows:
+        if b.source == "BindingDB" and b.inchikey is None and b.smiles:
+            if b.smiles not in seen:
+                seen.add(b.smiles)
+                uniq.append(b.smiles)
+    uniq = uniq[:cap]
+    if not uniq:
+        return
+    fetched = await asyncio.gather(
+        *[_pubchem_inchikey(client, s) for s in uniq], return_exceptions=True
+    )
+    smap: dict[str, str | None] = {}
+    for s, rk in zip(uniq, fetched, strict=False):
+        smap[s] = None if isinstance(rk, Exception) else rk  # type: ignore[assignment]
+    for b in rows:
+        if b.source == "BindingDB" and b.inchikey is None and b.smiles:
+            b.inchikey = smap.get(b.smiles)
 
 
 def _chembl_activity_to_model(activity: dict) -> Bioactivity:
@@ -520,6 +639,50 @@ def _dedupe_by_ligand_type(bioactivities: list[Bioactivity]) -> list[Bioactivity
     return out
 
 
+def _merge_cross_source(bioactivities: list[Bioactivity]) -> list[Bioactivity]:
+    """소스 무관, 같은 화합물(InChIKey 우선)·같은 type을 1건으로 병합한다.
+
+    InChIKey가 해석된 경우 ChEMBL↔BindingDB 동일 화합물도 병합된다.
+    InChIKey가 없으면 chembl_id/smiles/name으로 fallback(소스 내 dedup과 동일 효과).
+    대표는 중앙값 pChEMBL, 이름/chembl_id는 그룹에서 채우고 소스·건수를 주석한다.
+    """
+    groups: "OrderedDict[tuple, list[Bioactivity]]" = OrderedDict()
+    for b in bioactivities:
+        identity = (
+            b.inchikey
+            or b.ligand_chembl_id
+            or b.smiles
+            or (b.ligand_name or "").lower()
+        )
+        key = (identity, (b.standard_type or "").upper())
+        groups.setdefault(key, []).append(b)
+    out: list[Bioactivity] = []
+    for grp in groups.values():
+        if len(grp) == 1:
+            out.append(grp[0])
+            continue
+        with_p = sorted(
+            (g for g in grp if g.pchembl_value is not None),
+            key=lambda g: g.pchembl_value or 0.0,
+        )
+        rep = with_p[len(with_p) // 2] if with_p else grp[0]
+        # 무명 BindingDB 행이 ChEMBL과 병합되면 이름·chembl_id를 획득
+        if not rep.ligand_name:
+            rep.ligand_name = next((g.ligand_name for g in grp if g.ligand_name), None)
+        if not rep.ligand_chembl_id:
+            rep.ligand_chembl_id = next(
+                (g.ligand_chembl_id for g in grp if g.ligand_chembl_id), None
+            )
+        srcs = sorted({g.source for g in grp})
+        if len(srcs) > 1:
+            rep.source = "+".join(srcs)
+        rep.assay_description = (
+            f"[{len(grp)}건 측정 · {','.join(srcs)}] {rep.assay_description or ''}".strip()
+        )
+        out.append(rep)
+    return out
+
+
 # --------------------------------------------------------------------------
 # 공개 API
 # --------------------------------------------------------------------------
@@ -533,6 +696,7 @@ async def fetch_target_bioactivities(
     max_results: int = 50,
     include_iuphar: bool = True,
     include_bindingdb: bool = True,
+    include_functional: bool = True,
 ) -> TargetBioactivities:
     """타깃 UniProt accession으로 ChEMBL/IUPHAR 활성 데이터를 묶어서 반환.
 
@@ -678,14 +842,46 @@ async def fetch_target_bioactivities(
         for _b in result.bioactivities:
             result.source_counts[_b.source] = result.source_counts.get(_b.source, 0) + 1
 
-        # 같은 (ligand, type) 중복 측정 → 중앙값 대표 1건으로 축약 후
-        # pChEMBL 내림차순 정렬, distinct 리간드 max_results개로 절단
+        # 1단계: 소스 내 (ligand, type) 중복 → 중앙값 대표로 축약 후 pChEMBL 정렬
         result.bioactivities = _dedupe_by_ligand_type(result.bioactivities)
         result.bioactivities.sort(
             key=lambda b: (b.pchembl_value is None, -(b.pchembl_value or 0.0))
         )
-        if max_results and len(result.bioactivities) > max_results:
-            result.bioactivities = result.bioactivities[:max_results]
+
+        # 2단계: 크로스소스 병합 후보를 상위로 한정(InChIKey 해석 비용 bound),
+        # InChIKey 해석(ChEMBL 배치 + BindingDB→PubChem) → 소스 교차 중복 병합
+        merge_cap = (
+            max(max_results * 2, 60) if max_results else len(result.bioactivities)
+        )
+        candidates = result.bioactivities[:merge_cap]
+        try:
+            await _enrich_chembl_inchikeys(client, candidates)
+            await _enrich_bindingdb_inchikeys(client, candidates)
+        except Exception as exc:  # noqa: BLE001 - 해석 실패는 fatal 아님(fallback 키 사용)
+            result.notes.append(
+                f"⚠️ InChIKey 해석 일부 실패 — 크로스소스 중복통합이 불완전할 수 있습니다. (사유: {exc})"
+            )
+        candidates = _merge_cross_source(candidates)
+        candidates.sort(
+            key=lambda b: (b.pchembl_value is None, -(b.pchembl_value or 0.0))
+        )
+
+        # 3단계: distinct 화합물 max_results개로 절단
+        if max_results and len(candidates) > max_results:
+            candidates = candidates[:max_results]
+        result.bioactivities = candidates
+
+        # 4단계: 단일농도 기능 활성(% Inhibition / Residual activity) 별도 보강.
+        # pChEMBL이 없어 affinity 랭킹과 분리 — 자체 그룹으로 capped 표시.
+        if include_functional and result.chembl_target_id:
+            func_rows = _dedupe_by_ligand_type(
+                await _chembl_functional_activities(client, result.chembl_target_id)
+            )
+            if func_rows:
+                result.bioactivities.extend(func_rows)
+                result.source_counts["ChEMBL(%inhib)"] = result.source_counts.get(
+                    "ChEMBL(%inhib)", 0
+                ) + len(func_rows)
 
         # 최종 표시 행에 대해서만 이름·PMID 보강(네트워크 절약)
         try:

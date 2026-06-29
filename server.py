@@ -431,7 +431,8 @@ H-bond donors·acceptors / TPSA / 신약 phase / synonyms + 출처 URL"""
 _GET_TARGET_BIOACTIVITIES_DESCRIPTION = """\
 특정 타깃에 대한 화합물 활성 데이터(Ki / Kd / IC50 / EC50)를 ChEMBL·IUPHAR·BindingDB에서
 통합 수집합니다. 소스별 수집 건수와 미포함 소스(SciFinder 등)를 함께 표시해 '전량 여부'를
-투명하게 알립니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
+투명하게 알립니다. 결과는 측정법(Ki/Kd/IC50/EC50/%inhibition)별로 묶고 InChIKey로 소스 간
+중복 화합물을 통합합니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
 
 [자동 호출 조건]
 - "HTR2A 에 대한 risperidone Ki 알려줘"
@@ -1904,39 +1905,50 @@ def _render_bioactivities(
             "standard_types를 확장해보세요."
         )
     else:
-        lines.append("")
-        lines.append(
-            "| 순위 | 리간드 | Type | 값 | 단위 | pChEMBL | Assay | 출처 | PMID |"
-        )
-        lines.append(
-            "|------|--------|------|----|------|---------|-------|------|------|"
-        )
-        for i, b in enumerate(r.bioactivities, 1):
-            rel = b.standard_relation or ""
-            val = (
-                f"{rel}{b.standard_value:.4g}"
-                if b.standard_value is not None
-                else "-"
-            )
-            # 이름 없는 소스(BindingDB)는 SMILES로 식별 + monomer 링크
-            if b.ligand_name:
-                ligand_disp = _md_escape(b.ligand_name)
-            elif b.smiles:
-                sm = _md_escape(_trim(b.smiles, 28))
-                ligand_disp = f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
-            else:
-                ligand_disp = "-"
-            lines.append(
-                f"| {i} "
-                f"| {ligand_disp} "
-                f"| {b.standard_type or '-'} "
-                f"| {val} "
-                f"| {b.standard_units or '-'} "
-                f"| {_format_num(b.pchembl_value, '{:.2f}')} "
-                f"| {_md_escape(_trim(b.assay_description, 60))} "
-                f"| {b.source} "
-                f"| {b.pubmed_id or '-'} |"
-            )
+        # method(standard_type)별 그룹 출력 — 연구원 '방법별 정리' 요구 대응.
+        # affinity 4종(Ki/Kd/IC50/EC50) 우선, %류(Inhibition/Residual)는 맨 뒤.
+        _TYPE_ORDER = {"KI": 0, "KD": 1, "IC50": 2, "EC50": 3}
+        groups: dict[str, list] = {}
+        for b in r.bioactivities:
+            groups.setdefault((b.standard_type or "기타").upper(), []).append(b)
+
+        def _grp_sort_key(item: tuple) -> tuple:
+            t = item[0]
+            is_pct = any(k in t for k in ("INHIBITION", "RESIDUAL", "ACTIVITY"))
+            return (1 if is_pct else 0, _TYPE_ORDER.get(t, 40), t)
+
+        for _gt, rows in sorted(groups.items(), key=_grp_sort_key):
+            lines.append("")
+            lines.append(f"#### {rows[0].standard_type or _gt} — {len(rows)}건")
+            lines.append("| 순위 | 리간드 | 값 | 단위 | pChEMBL | Assay | 출처 | PMID |")
+            lines.append("|------|--------|----|------|---------|-------|------|------|")
+            for i, b in enumerate(rows, 1):
+                rel = b.standard_relation or ""
+                val = (
+                    f"{rel}{b.standard_value:.4g}"
+                    if b.standard_value is not None
+                    else "-"
+                )
+                # 이름 없는 소스(BindingDB)는 SMILES로 식별 + monomer 링크
+                if b.ligand_name:
+                    ligand_disp = _md_escape(b.ligand_name)
+                elif b.smiles:
+                    sm = _md_escape(_trim(b.smiles, 28))
+                    ligand_disp = (
+                        f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
+                    )
+                else:
+                    ligand_disp = "-"
+                lines.append(
+                    f"| {i} "
+                    f"| {ligand_disp} "
+                    f"| {val} "
+                    f"| {b.standard_units or '-'} "
+                    f"| {_format_num(b.pchembl_value, '{:.2f}')} "
+                    f"| {_md_escape(_trim(b.assay_description, 60))} "
+                    f"| {b.source} "
+                    f"| {b.pubmed_id or '-'} |"
+                )
 
     if r.sources:
         lines.append("")

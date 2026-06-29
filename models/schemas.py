@@ -121,6 +121,7 @@ class Bioactivity(BaseModel):
     ligand_name: Optional[str] = None
     ligand_chembl_id: Optional[str] = None
     smiles: Optional[str] = None  # 이름 없는 소스(BindingDB) 식별 + 크로스소스 중복통합용
+    inchikey: Optional[str] = None  # 크로스소스 중복통합 키(ChEMBL inchi_key / PubChem 해석)
     target_chembl_id: Optional[str] = None
     standard_type: Optional[str] = None  # Ki / Kd / IC50 / EC50
     standard_relation: Optional[str] = None  # "=" / "<" / ">"
