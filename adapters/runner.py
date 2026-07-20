@@ -346,7 +346,7 @@ async def run_bioactivity(args: argparse.Namespace) -> DispatchResult:
     raw_min = getattr(args, "min_pchembl", None)
     # 미지정(None)이면 문서화된 기본 6.0(≈1 µM) 적용. 명시적 0이면 컷오프 해제.
     min_pchembl = 6.0 if raw_min is None else float(raw_min)
-    max_results = getattr(args, "max", None) or 30
+    max_results = getattr(args, "max", None) or 50
     include_iuphar = not bool(getattr(args, "no_iuphar", False))
     types = _split_csv(getattr(args, "types", None))
     standard_types = tuple(types) if types else ("Ki", "Kd", "IC50", "EC50")
@@ -417,7 +417,7 @@ async def run_papers(args: argparse.Namespace) -> DispatchResult:
         return DispatchResult(
             tool="search_papers", error="검색 쿼리를 입력해주세요.", exit_code=2,
         )
-    max_results = getattr(args, "max", None) or 5
+    max_results = getattr(args, "max", None) or 10
     try:
         papers: list[PaperAbstract] = await search_papers(query, max_results=max_results)
     except LiteratureAPIError as exc:
@@ -574,8 +574,8 @@ async def run_intel(args: argparse.Namespace) -> DispatchResult:
             error="gene symbol 또는 Ensembl gene ID를 입력해주세요.",
             exit_code=2,
         )
-    max_diseases = getattr(args, "max_diseases", None) or 15
-    max_drugs = getattr(args, "max_drugs", None) or 15
+    max_diseases = getattr(args, "max_diseases", None) or 25
+    max_drugs = getattr(args, "max_drugs", None) or 25
 
     try:
         intel: TargetIntelligence | None = await fetch_target_intelligence(

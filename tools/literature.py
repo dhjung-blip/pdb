@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import re
 from html import unescape
-from urllib.parse import quote
 
 import httpx
 
@@ -386,7 +385,7 @@ async def fetch_paper_abstract(
 
 
 async def search_papers(
-    query: str, max_results: int = 5
+    query: str, max_results: int = 10
 ) -> list[PaperAbstract]:
     """자유 텍스트로 Europe PMC를 검색해 상위 N개의 PaperAbstract를 반환한다.
 

@@ -34,6 +34,12 @@ query GetPDBEntry($id: String!) {
     rcsb_entry_info {
       resolution_combined
       experimental_method
+      assembly_count
+      deposited_polymer_entity_instance_count
+    }
+    refine {
+      ls_R_factor_R_work
+      ls_R_factor_R_free
     }
     rcsb_accession_info {
       initial_release_date
@@ -59,6 +65,27 @@ query GetPDBEntry($id: String!) {
 }
 """
 
+# 결정화 첨가물/버퍼/이온/지질 — ref 화합물(저해제)에서 제외
+_BUFFER_LIGANDS = {
+    "HOH", "DOD", "SO4", "PO4", "GOL", "EDO", "PEG", "PGE", "PG4", "1PE", "2PE",
+    "P6G", "P33", "CLR", "OLC", "OLA", "PLM", "MG", "NA", "CL", "K", "ZN", "CA",
+    "MN", "FE", "CD", "NI", "CU", "ACT", "DMS", "TRS", "EPE", "MES", "FMT", "IOD",
+    "BR", "CO3", "NO3", "NH4", "CAC", "BME", "DTT", "IMD", "FLC", "TLA", "MPD",
+    "BOG", "LDA", "LMT", "Y01", "PLC", "POV", "PEW", "SIN", "SCN", "AZI", "PE4",
+}
+
+# get_pdb_detail 전용 — 결합 리간드 + RCSB 보고 binding affinity (검색 경로엔 미사용)
+_LIGANDS_QUERY = """
+query GetPDBLigands($id: String!) {
+  entry(entry_id: $id) {
+    rcsb_binding_affinity { comp_id type value unit provenance_code }
+    nonpolymer_entities {
+      nonpolymer_comp { chem_comp { id name } }
+    }
+  }
+}
+"""
+
 
 def format_method(method: str | None) -> str:
     """RCSB의 실험방법 문자열을 짧은 표기로 변환한다."""
@@ -78,6 +105,14 @@ def format_method(method: str | None) -> str:
     if "ELECTRON CRYSTALLOGRAPHY" in m:
         return "Electron Crystallography"
     return method.title()
+
+
+def _safe_float(value) -> float | None:
+    """안전 float 변환 — None/비수치는 None."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_citation(citations: list[dict]) -> Citation | None:
@@ -156,6 +191,12 @@ def _parse_entry(pdb_id: str, entry: dict) -> PDBEntry:
 
     citation = _parse_citation(entry.get("citation") or [])
 
+    # 구조 품질(QC) — X-ray refine R-factor (refine는 리스트; EM/NMR은 null)
+    refine_list = entry.get("refine") or []
+    rf = refine_list[0] if refine_list else {}
+    r_work = _safe_float((rf or {}).get("ls_R_factor_R_work"))
+    r_free = _safe_float((rf or {}).get("ls_R_factor_R_free"))
+
     return PDBEntry(
         pdb_id=pdb_id,
         resolution=resolution,
@@ -164,6 +205,10 @@ def _parse_entry(pdb_id: str, entry: dict) -> PDBEntry:
         title=title,
         polymer_descriptions=polymer_descriptions,
         citation=citation,
+        r_work=r_work,
+        r_free=r_free,
+        assembly_count=info.get("assembly_count"),
+        deposited_chain_count=info.get("deposited_polymer_entity_instance_count"),
     )
 
 
@@ -230,12 +275,45 @@ async def fetch_all_pdb_entries_with_failures(
 
     entries: list[PDBEntry] = []
     failed: list[str] = []
-    for pid, r in zip(pdb_ids, results):
+    for pid, r in zip(pdb_ids, results, strict=False):
         if isinstance(r, PDBEntry):
             entries.append(r)
         else:
             failed.append(pid.upper())
     return entries, failed
+
+
+async def _fetch_entry_ligands(
+    client: httpx.AsyncClient, pdb_id: str
+) -> tuple[list[dict], list[dict]]:
+    """결합 리간드(버퍼/이온 제외) + RCSB 보고 binding affinity. 실패 시 ([], [])."""
+    try:
+        resp = await client.post(
+            RCSB_GRAPHQL_URL,
+            json={"query": _LIGANDS_QUERY, "variables": {"id": pdb_id}},
+        )
+        resp.raise_for_status()
+        entry = (resp.json().get("data") or {}).get("entry") or {}
+    except (httpx.HTTPError, ValueError):
+        return [], []
+    ligands: list[dict] = []
+    for npe in entry.get("nonpolymer_entities") or []:
+        cc = (npe.get("nonpolymer_comp") or {}).get("chem_comp") or {}
+        cid = cc.get("id")
+        if cid and cid.upper() not in _BUFFER_LIGANDS:
+            ligands.append({"id": cid, "name": cc.get("name")})
+    affinities: list[dict] = []
+    for ba in entry.get("rcsb_binding_affinity") or []:
+        affinities.append(
+            {
+                "comp_id": ba.get("comp_id"),
+                "type": ba.get("type"),
+                "value": ba.get("value"),
+                "unit": ba.get("unit"),
+                "provenance": ba.get("provenance_code"),
+            }
+        )
+    return ligands, affinities
 
 
 async def fetch_single_pdb_entry(pdb_id: str) -> PDBEntry:
@@ -249,7 +327,11 @@ async def fetch_single_pdb_entry(pdb_id: str) -> PDBEntry:
         raise ValueError("PDB ID가 비어 있습니다.")
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            return await _fetch_entry(client, pdb_id)
+            entry = await _fetch_entry(client, pdb_id)
+            entry.ligands, entry.binding_affinities = await _fetch_entry_ligands(
+                client, pdb_id
+            )
+            return entry
     except httpx.TimeoutException as exc:
         raise ValueError(
             "PDB 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요."

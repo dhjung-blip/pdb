@@ -401,7 +401,9 @@ _GET_PDB_DETAIL_DESCRIPTION = """\
 [출력]
 GPCR 구조: Resolution / Method / Released Date / State / Ligand /
             Ligand modality / Signaling protein / Fusion / Antibody / 논문 전체
-비GPCR 구조: Resolution / Method / Released Date / 논문 전체"""
+비GPCR 구조: Resolution / Method / Released Date / 논문 전체
+구조 품질·구성(공통): R-free·R-work(X-ray refine) / assembly 수 / polymer chain 수
+결합 리간드(ref 화합물): 버퍼/이온 제외한 결합 화합물 + RCSB 보고 binding affinity"""
 
 
 # --------------------------------------------------------------------------
@@ -428,8 +430,10 @@ PubChem CID / ChEMBL ID / IUPHAR ID / SMILES / InChI / MW / LogP /
 H-bond donors·acceptors / TPSA / 신약 phase / synonyms + 출처 URL"""
 
 _GET_TARGET_BIOACTIVITIES_DESCRIPTION = """\
-특정 타깃에 대한 화합물 활성 데이터(Ki / Kd / IC50 / EC50)를 ChEMBL과 IUPHAR에서
-가져옵니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
+특정 타깃에 대한 화합물 활성 데이터(Ki / Kd / IC50 / EC50)를 ChEMBL·IUPHAR·BindingDB에서
+통합 수집합니다. 소스별 수집 건수와 미포함 소스(SciFinder 등)를 함께 표시해 '전량 여부'를
+투명하게 알립니다. 결과는 측정법(Ki/Kd/IC50/EC50/%inhibition)별로 묶고 InChIKey로 소스 간
+중복 화합물을 통합합니다. Claude가 binding affinity 수치를 기억으로 답하지 않게 하는 도구입니다.
 
 [자동 호출 조건]
 - "HTR2A 에 대한 risperidone Ki 알려줘"
@@ -746,8 +750,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "결과 상한. 기본 30.",
-                        "default": 30,
+                        "description": "결과 상한(리간드·타입별 대표값으로 축약). 기본 50. 더 필요하면 올리세요.",
+                        "default": 50,
                     },
                     "include_iuphar": {
                         "type": "boolean",
@@ -781,8 +785,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "최대 결과 수 (1~25, 기본 5)",
-                        "default": 5,
+                        "description": "최대 결과 수 (1~25, 기본 10)",
+                        "default": 10,
                     },
                 },
                 "required": ["query"],
@@ -886,13 +890,13 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_diseases": {
                         "type": "integer",
-                        "description": "표시할 질환 수 (기본 15)",
-                        "default": 15,
+                        "description": "표시할 질환 수 (기본 25)",
+                        "default": 25,
                     },
                     "max_drugs": {
                         "type": "integer",
-                        "description": "표시할 known drugs 수 (기본 15)",
-                        "default": 15,
+                        "description": "표시할 known drugs 수 (기본 25)",
+                        "default": 25,
                     },
                 },
                 "required": ["target_query"],
@@ -1502,6 +1506,33 @@ async def handle_get_pdb_detail(arguments: dict) -> list[types.TextContent]:
     return _text(_render_pdb_detail(entry))
 
 
+def _summarize_binding_affinity(affs: list[dict]) -> str:
+    """RCSB binding affinity 목록을 type별 중앙값+건수로 요약(HTML 엔티티 해제)."""
+    import html as _html
+
+    grouped: dict[tuple, list[float]] = {}
+    prov = ""
+    for a in affs:
+        prov = prov or (a.get("provenance") or "")
+        v = a.get("value")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        t = _html.unescape(str(a.get("type") or "?"))
+        grouped.setdefault((t, a.get("unit") or ""), []).append(fv)
+    parts = []
+    for (t, unit), vals in grouped.items():
+        vals.sort()
+        med = vals[len(vals) // 2]
+        suffix = f" ×{len(vals)}건" if len(vals) > 1 else ""
+        parts.append(f"{t} {med:.3g} {unit}{suffix}".strip())
+    out = ", ".join(parts)
+    return f"{out} ({prov})" if prov else out
+
+
 def _render_pdb_detail(entry: PDBEntry) -> str:
     lines: list[str] = []
     header = f"## PDB {entry.pdb_id} — 상세 정보"
@@ -1516,6 +1547,39 @@ def _render_pdb_detail(entry: PDBEntry) -> str:
     lines.append(f"**실험 방법**: {format_method(entry.method)}{method_raw}  ")
     lines.append(f"**공개일(Released Date)**: {entry.released_date or '-'}  ")
     lines.append(f"**RCSB 페이지**: https://www.rcsb.org/structure/{entry.pdb_id}")
+
+    # 구조 품질·구성(QC) — 값이 있을 때만 (X-ray는 R-free/R-work, EM·NMR은 생략)
+    qc: list[str] = []
+    if entry.r_free is not None:
+        qc.append(f"R-free {entry.r_free:.3f}")
+    if entry.r_work is not None:
+        qc.append(f"R-work {entry.r_work:.3f}")
+    if entry.assembly_count:
+        qc.append(f"assembly {entry.assembly_count}개")
+    if entry.deposited_chain_count:
+        qc.append(f"polymer chain {entry.deposited_chain_count}개")
+    if qc:
+        lines.append(f"**구조 품질·구성**: {' · '.join(qc)}")
+
+    # 결합 리간드(ref 화합물) + RCSB 보고 binding affinity (P3)
+    if entry.ligands:
+        lines.append("")
+        lines.append("### 결합 리간드 (ref 화합물)")
+        aff_by_comp: dict = {}
+        for a in entry.binding_affinities:
+            aff_by_comp.setdefault(a.get("comp_id"), []).append(a)
+        for lig in entry.ligands:
+            cid = lig.get("id")
+            row = f"- **{cid}** — {lig.get('name') or '-'}"
+            affs = aff_by_comp.get(cid) or []
+            if affs:
+                row += f"  · 결합활성: {_summarize_binding_affinity(affs)}"
+            row += f"  · [리간드 상세](https://www.rcsb.org/ligand/{cid})"
+            lines.append(row)
+        lines.append(
+            "  ⓘ 화합물 물성/known inhibitor 활성은 `get_ligand_detail`(이름·ID) 또는 "
+            "`get_target_bioactivities`(타깃)로 확인."
+        )
 
     if entry.is_gpcr:
         lines.append("")
@@ -1812,7 +1876,7 @@ async def handle_get_target_bioactivities(
     min_pchembl = _coerce_float(arguments.get("min_pchembl"))
     if min_pchembl == 0:
         min_pchembl = None
-    max_results = _coerce_int(arguments.get("max_results")) or 30
+    max_results = _coerce_int(arguments.get("max_results")) or 50
     include_iuphar = bool(arguments.get("include_iuphar", True))
     raw_types = arguments.get("standard_types")
     if isinstance(raw_types, list) and raw_types:
@@ -1846,8 +1910,35 @@ def _render_bioactivities(
     lines.append(f"- **IUPHAR target**: {r.iuphar_target_id or '-'}")
     if min_pchembl is not None:
         lines.append(f"- **pChEMBL 컷오프**: ≥ {min_pchembl}")
-    lines.append(f"- **ChEMBL 보고 총 활성**: {r.total_count}건 (필터 적용 전)")
-    lines.append(f"- **반환된 활성**: {len(r.bioactivities)}건")
+
+    # 수집 소스 분해 (dedup·절단 전) — 연구원 '전량인지' 의문 해소
+    collected = sum(r.source_counts.values()) if r.source_counts else r.total_count
+    if r.source_counts:
+        breakdown = " · ".join(
+            f"{s} {n}건"
+            for s, n in sorted(r.source_counts.items(), key=lambda x: -x[1])
+        )
+        lines.append(f"- **수집 소스 분해**: {breakdown} (합 {collected}건, dedup·절단 전)")
+        chembl_got = r.source_counts.get("ChEMBL", 0)
+        if r.total_count and r.total_count > chembl_got:
+            lines.append(
+                f"  - ⓘ ChEMBL은 매칭 {r.total_count}건 중 {chembl_got}건만 수집(pool 한도) "
+                "— 전수는 `max_results`↑ 또는 Excel."
+            )
+    lines.append(f"- **표시된 활성**: {len(r.bioactivities)}건 (리간드·타입별 대표값으로 축약)")
+    if collected and len(r.bioactivities) < collected:
+        lines.append(
+            "  - ⓘ 더 받으려면 `max_results`를 올리거나 `min_pchembl`을 낮추세요 "
+            "(전체는 Excel 권장) — 표시되지 않은 활성이 더 있습니다."
+        )
+
+    # 수집 범위 투명성 — 무엇을 보고/안 보는지 (연구원 '완전성' 의문 대응)
+    queried = " · ".join(r.source_counts.keys()) if r.source_counts else "없음"
+    lines.append(
+        f"- **수집 범위**: 수집 소스 = {queried}. "
+        "미포함 = SciFinder(CAS 유료 — API 불가) · 특허 전수(BindingDB/ChEMBL 경유 일부만) · "
+        "PubChem BioAssay. → '전량'이 아니라 **위 소스 한정 수집**입니다."
+    )
 
     # API 장애 등 부분 실패가 있었으면 명시적으로 노출
     if r.notes:
@@ -1862,31 +1953,50 @@ def _render_bioactivities(
             "standard_types를 확장해보세요."
         )
     else:
-        lines.append("")
-        lines.append(
-            "| 순위 | 리간드 | Type | 값 | 단위 | pChEMBL | Assay | 출처 | PMID |"
-        )
-        lines.append(
-            "|------|--------|------|----|------|---------|-------|------|------|"
-        )
-        for i, b in enumerate(r.bioactivities, 1):
-            rel = b.standard_relation or ""
-            val = (
-                f"{rel}{b.standard_value:.4g}"
-                if b.standard_value is not None
-                else "-"
-            )
-            lines.append(
-                f"| {i} "
-                f"| {_md_escape(b.ligand_name or '-')} "
-                f"| {b.standard_type or '-'} "
-                f"| {val} "
-                f"| {b.standard_units or '-'} "
-                f"| {_format_num(b.pchembl_value, '{:.2f}')} "
-                f"| {_md_escape(_trim(b.assay_description, 60))} "
-                f"| {b.source} "
-                f"| {b.pubmed_id or '-'} |"
-            )
+        # method(standard_type)별 그룹 출력 — 연구원 '방법별 정리' 요구 대응.
+        # affinity 4종(Ki/Kd/IC50/EC50) 우선, %류(Inhibition/Residual)는 맨 뒤.
+        _TYPE_ORDER = {"KI": 0, "KD": 1, "IC50": 2, "EC50": 3}
+        groups: dict[str, list] = {}
+        for b in r.bioactivities:
+            groups.setdefault((b.standard_type or "기타").upper(), []).append(b)
+
+        def _grp_sort_key(item: tuple) -> tuple:
+            t = item[0]
+            is_pct = any(k in t for k in ("INHIBITION", "RESIDUAL", "ACTIVITY"))
+            return (1 if is_pct else 0, _TYPE_ORDER.get(t, 40), t)
+
+        for _gt, rows in sorted(groups.items(), key=_grp_sort_key):
+            lines.append("")
+            lines.append(f"#### {rows[0].standard_type or _gt} — {len(rows)}건")
+            lines.append("| 순위 | 리간드 | 값 | 단위 | pChEMBL | Assay | 출처 | PMID |")
+            lines.append("|------|--------|----|------|---------|-------|------|------|")
+            for i, b in enumerate(rows, 1):
+                rel = b.standard_relation or ""
+                val = (
+                    f"{rel}{b.standard_value:.4g}"
+                    if b.standard_value is not None
+                    else "-"
+                )
+                # 이름 없는 소스(BindingDB)는 SMILES로 식별 + monomer 링크
+                if b.ligand_name:
+                    ligand_disp = _md_escape(b.ligand_name)
+                elif b.smiles:
+                    sm = _md_escape(_trim(b.smiles, 28))
+                    ligand_disp = (
+                        f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
+                    )
+                else:
+                    ligand_disp = "-"
+                lines.append(
+                    f"| {i} "
+                    f"| {ligand_disp} "
+                    f"| {val} "
+                    f"| {b.standard_units or '-'} "
+                    f"| {_format_num(b.pchembl_value, '{:.2f}')} "
+                    f"| {_md_escape(_trim(b.assay_description, 60))} "
+                    f"| {b.source} "
+                    f"| {b.pubmed_id or '-'} |"
+                )
 
     if r.sources:
         lines.append("")
@@ -1983,7 +2093,7 @@ async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
     if not query:
         return _text("검색 쿼리를 입력해주세요.")
 
-    max_results = _coerce_int(arguments.get("max_results")) or 5
+    max_results = _coerce_int(arguments.get("max_results")) or 10
     try:
         papers = await search_papers(query, max_results=max_results)
     except LiteratureAPIError as exc:
@@ -2150,6 +2260,8 @@ def _render_variants(
     if parts:
         lines.append(f"필터: {', '.join(parts)}")
     lines.append(f"반환된 변이: {len(v.variants)}건 (총 {v.total_count}건)")
+    if v.total_count and len(v.variants) < v.total_count:
+        lines.append("> ⓘ 표시되지 않은 변이가 더 있습니다 — max_results를 올리세요.")
 
     if not v.variants:
         lines.append("")
@@ -2304,8 +2416,8 @@ async def handle_get_target_intelligence(
     if not query:
         return _text("gene symbol 또는 Ensembl gene ID를 입력해주세요.")
 
-    max_diseases = _coerce_int(arguments.get("max_diseases")) or 15
-    max_drugs = _coerce_int(arguments.get("max_drugs")) or 15
+    max_diseases = _coerce_int(arguments.get("max_diseases")) or 25
+    max_drugs = _coerce_int(arguments.get("max_drugs")) or 25
 
     try:
         intel = await fetch_target_intelligence(
@@ -2336,7 +2448,11 @@ def _render_target_intel(t: TargetIntelligence) -> str:
 
     if t.diseases:
         lines.append("")
-        lines.append(f"### 연관 질환 상위 {len(t.diseases)}개 (종합 점수 내림차순)")
+        _td = t.disease_count or len(t.diseases)
+        _more_d = " · 더 보려면 max_diseases↑" if _td > len(t.diseases) else ""
+        lines.append(
+            f"### 연관 질환 — 총 {_td}건 중 {len(t.diseases)}개 표시 (점수 내림차순){_more_d}"
+        )
         lines.append("| # | Disease | EFO ID | Score | Therapeutic areas |")
         lines.append("|---|---------|--------|-------|-------------------|")
         for i, d in enumerate(t.diseases, 1):
@@ -2354,7 +2470,11 @@ def _render_target_intel(t: TargetIntelligence) -> str:
 
     if t.known_drugs:
         lines.append("")
-        lines.append(f"### Known drugs ({len(t.known_drugs)}건)")
+        _kd = t.known_drug_count or len(t.known_drugs)
+        _more_k = " · 더 보려면 max_drugs↑" if _kd > len(t.known_drugs) else ""
+        lines.append(
+            f"### Known drugs — 총 {_kd}건 중 {len(t.known_drugs)}건 표시{_more_k}"
+        )
         lines.append(
             "| Drug | Type | Mechanism | Max phase | Indication |"
         )

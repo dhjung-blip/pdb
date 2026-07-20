@@ -33,6 +33,18 @@ class PDBEntry(BaseModel):
     # RCSB polymer entity 설명 목록 (Fusion protein / Antibody 추출용)
     polymer_descriptions: List[str] = Field(default_factory=list)
 
+    # ── 구조 품질(QC) 필드 (get_pdb_detail 심화용 — 검색 표엔 미표시) ──
+    r_work: Optional[float] = None  # X-ray 정밀화 R-work
+    r_free: Optional[float] = None  # X-ray 정밀화 R-free (모델 품질 핵심 지표)
+    assembly_count: Optional[int] = None  # 생물학적 assembly 수
+    deposited_chain_count: Optional[int] = None  # 침착된 polymer chain 수 (올리고머 규모)
+
+    # ── 결합 리간드(ref 화합물) — get_pdb_detail 심화 (P3); 버퍼/이온 제외 ──
+    ligands: List[dict] = Field(default_factory=list)  # [{"id","name"}]
+    binding_affinities: List[dict] = Field(
+        default_factory=list
+    )  # RCSB 보고 [{"comp_id","type","value","unit","provenance"}]
+
     # ── GPCR 확장 필드 (GPCR 타깃일 때만 채워짐, 아니면 None) ──
     pref_chain: Optional[str] = None  # 예: "A"
     state: Optional[str] = None  # "Active" | "Inactive" | "Intermediate"
@@ -114,6 +126,8 @@ class Bioactivity(BaseModel):
 
     ligand_name: Optional[str] = None
     ligand_chembl_id: Optional[str] = None
+    smiles: Optional[str] = None  # 이름 없는 소스(BindingDB) 식별 + 크로스소스 중복통합용
+    inchikey: Optional[str] = None  # 크로스소스 중복통합 키(ChEMBL inchi_key / PubChem 해석)
     target_chembl_id: Optional[str] = None
     standard_type: Optional[str] = None  # Ki / Kd / IC50 / EC50
     standard_relation: Optional[str] = None  # "=" / "<" / ">"
@@ -124,7 +138,7 @@ class Bioactivity(BaseModel):
     assay_description: Optional[str] = None
     document_chembl_id: Optional[str] = None
     pubmed_id: Optional[str] = None
-    source: str = "ChEMBL"  # "ChEMBL" | "IUPHAR"
+    source: str = "ChEMBL"  # "ChEMBL" | "IUPHAR" | "BindingDB"
     source_url: Optional[str] = None
 
 
@@ -139,6 +153,7 @@ class TargetBioactivities(BaseModel):
     bioactivities: List[Bioactivity] = Field(default_factory=list)
     total_count: int = 0  # 필터링 전 ChEMBL이 보고한 활성 총 개수
     sources: dict = Field(default_factory=dict)
+    source_counts: dict = Field(default_factory=dict)  # 소스별 수집 건수(절단 전) — 투명성
     notes: List[str] = Field(default_factory=list)
 
 
@@ -292,4 +307,6 @@ class TargetIntelligence(BaseModel):
     biotype: Optional[str] = None
     diseases: List[DiseaseAssociation] = Field(default_factory=list)
     known_drugs: List[KnownDrug] = Field(default_factory=list)
+    disease_count: int = 0  # OpenTargets가 보고한 연관 질환 총 수 (표시는 max_diseases개)
+    known_drug_count: int = 0  # known drug 후보 총 수 (표시는 max_drugs개, 중복 약물 통합)
     source_url: Optional[str] = None
