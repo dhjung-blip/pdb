@@ -300,7 +300,36 @@ def _citation_cell(entry: PDBEntry) -> str:
 # Tool 정의 — description에 자동 판단 규칙을 내장
 # --------------------------------------------------------------------------
 
-_SEARCH_TARGET_DESCRIPTION = """\
+# Excel 규격은 반드시 이 description(=.mcpb/plugin에 포함되어 모든 설치자에게 배포)에
+# 담는다. SYSTEM_PROMPT.md(Custom Instructions)는 붙여넣은 사람에게만 적용되므로,
+# 규격을 그쪽에만 두면 설치자별로 출력이 달라진다.
+_EXCEL_SPEC = """\
+[Excel 출력 규격 — 이 규격을 그대로 지켜 xlsx 스킬로 파일을 만드세요]
+파일명: 단일 `{유전자명}_{Accession}_structures_{YYYYMMDD}.xlsx`
+        패밀리 `{family_label}_family_structures_{YYYYMMDD}.xlsx`
+시트: 첫 시트는 항상 `Summary`(UniProt accession·단백질명·유전자명, GPCR 여부, 총 구조 수,
+      조회 일시, 패밀리면 State별 집계). 패밀리는 타깃별 시트(HTR2A, HTR2B…) 추가,
+      단일이면 두 번째 시트 `Structures`.
+컬럼 — 비GPCR(12, 이 순서): PDB ID(링크 https://www.rcsb.org/structure/{ID}) / Resolution (Å)
+      (number_format 0.00, NMR은 "N/A") / Method / Released Date / Entry Title / Paper Title /
+      Authors / Journal / Year / Citation (ACS) / DOI(링크 https://doi.org/{DOI}) /
+      PMID(링크 https://pubmed.ncbi.nlm.nih.gov/{PMID})
+컬럼 — GPCR(14, 이 순서): Method / PDB ID(링크) / Res. (Å)(0.00) / Pref. chain / State* /
+      Ligand / Ligand modality* / Sign. prot. / Fusion protein / Antibody / Year /
+      Citation (ACS) / DOI(링크) / PMID(링크)   (*조건부 색상)
+조건부 색상: State — Active #DCFCE7, Inactive #FEF2F2, Intermediate #FEF9C3.
+      Ligand modality — Agonist/Partial agonist #DCFCE7, Antagonist #FEF2F2, Inverse agonist #FFF7ED.
+공통 서식: 헤더 배경 #1E293B·흰 글자·굵게 / 짝수 행 #F8FAFC / freeze_panes=A2 /
+      컬럼 너비 자동, Citation (ACS)는 폭 60-80 + wrap_text=True.
+정렬: GPCR은 State(Inactive→Active→Intermediate→없음) 후 공개일 내림차순. 비GPCR은 공개일 내림차순.
+데이터 무결성(중요): 이 도구가 돌려준 값을 **그대로** 넣습니다. Ligand/Ligand modality/
+      Signaling protein/Fusion protein/Antibody/State가 "-"이면 셀도 "-"로 두고 자체 지식으로
+      채우지 않습니다(추측 금지). modality 값을 Ligand 컬럼에 넣지 않습니다. Citation (ACS)·
+      Authors·DOI·PMID는 재포맷하지 않고 그대로(셀에 링크만 추가). Resolution은 숫자 그대로 + 0.00 서식.
+"""
+
+_SEARCH_TARGET_DESCRIPTION = (
+    """\
 단백질 타겟 이름으로 PDB 구조 전체를 검색하고 표로 반환합니다.
 
 [자동 호출 조건]
@@ -331,9 +360,13 @@ GPCR 타겟(HTR*, DRD*, ADRB*, CHRM*, HRH*, OPR* 등):
 
 [Excel 출력]
 이 도구는 데이터 테이블(마크다운)만 반환합니다. .xlsx 파일이 필요하면
-Claude 의 xlsx 스킬로 만드세요 (Custom Instructions 참고). export_excel
-기본값은 false 이며, 명시적으로 true 를 전달하면 서버측 저장을 시도하지만
-Claude Desktop 의 macOS 샌드박스에서 실패할 수 있어 권장하지 않습니다.
+Claude 의 xlsx 스킬로 아래 규격대로 만드세요. export_excel 기본값은 false 이며,
+명시적으로 true 를 전달하면 서버측 저장을 시도하지만 Claude Desktop 의 macOS
+샌드박스에서 실패할 수 있어 권장하지 않습니다.
+
+"""
+    + _EXCEL_SPEC
+    + """
 
 [필터 파라미터 자동 설정]
 - "고해상도" 언급 시 → max_resolution=2.5
@@ -346,15 +379,21 @@ Claude Desktop 의 macOS 샌드박스에서 실패할 수 있어 권장하지 �
 단일 서브타입이 명확하면 이 도구 1회 호출.
 "세로토닌 수용체 전체" 처럼 패밀리 전체, 여러 타깃 통합 Excel, 5-HT2 패밀리
 전체 정리가 요청되면 이 도구를 반복 호출하지 말고 search_family 도구를 호출합니다."""
+)
 
-_SEARCH_FAMILY_DESCRIPTION = """\
+_SEARCH_FAMILY_DESCRIPTION = (
+    """\
 여러 타겟(수용체 패밀리)의 PDB 구조를 한 번에 검색해 타겟별 데이터를 반환합니다.
 
 [자동 호출 조건]
 - "세로토닌 2 패밀리", "5-HT2 전체", "HTR2A/2B/2C 전체 정리" 처럼
   여러 타겟의 구조 목록이 함께 필요한 경우 호출합니다.
 - 연구원이 "엑셀", "파일", "시트", "패밀리 전체"를 언급해도 이 도구를 먼저 호출해
-  데이터를 받고, 그 다음 Claude 의 xlsx 스킬로 .xlsx 를 만드세요.
+  데이터를 받고, 그 다음 Claude 의 xlsx 스킬로 아래 [Excel 출력 규격]대로 .xlsx 를 만드세요.
+
+"""
+    + _EXCEL_SPEC
+    + """
 
 [패밀리 자동 확장 규칙]
 - "세로토닌 2" / "5-HT2" / "HTR2 패밀리" → ["HTR2A", "HTR2B", "HTR2C"]
@@ -371,6 +410,7 @@ _SEARCH_FAMILY_DESCRIPTION = """\
 따르세요(시트 구성·컬럼·State 색상·ACS 인용·하이퍼링크). export_excel
 기본값은 false 이며, 명시적으로 true 를 전달하면 서버측 저장을 시도하지만
 Claude Desktop 의 macOS 샌드박스에서 실패할 수 있어 권장하지 않습니다."""
+)
 
 _COMPARE_TARGETS_DESCRIPTION = """\
 여러 타겟을 동시에 검색하여 구조 수·해상도·최신 구조를 비교합니다.
@@ -1545,8 +1585,18 @@ Mutation·Sequence Length·Chain·Organism·Gene·Macromolecule·Ligand SMILES�
 - 구조·엔티티 시트: PDB/Method/Res/Release/Structure Title/Chain ID/Seq Length/Organism/Gene/
   Macromolecule Name/Mutation (엔티티·organism 단위 행)
 
-[엑셀 작성 시] 서브타입마다 `{타깃}_Ligand` + `{타깃}` 2시트, 파일명 `{타깃}_structure_detail_{YYYYMMDD}.xlsx`.
-State/Modality는 GPCRdb 의존 — 미등재 구조는 그 2칸만 빈칸(추측 금지).
+[엑셀 작성 시 — 이 규격 그대로]
+- 시트: 서브타입마다 `{타깃}_Ligand` + `{타깃}` 2장 (예: HTR2A_Ligand, HTR2A)
+  - `{타깃}_Ligand` 컬럼 순서: PDB ID / Method / Resolution (Å) / Release Date / State /
+    Organism / Mutation / Ligand / Ligand Modality / Ligand ID / Ligand SMILES / Note
+  - `{타깃}` 컬럼 순서: PDB ID / Method / Resolution (Å) / Release Date / Structure Title /
+    Chain ID / Sequence Length / Organism / Gene Name / Macromolecule Name / Mutation
+    (엔티티·organism 단위 행 — PDB 공통 필드는 첫 행에만 채우고 이어지는 행은 비움)
+- 파일명: `{타깃}_structure_detail_{YYYYMMDD}.xlsx` (약리 요약의 `_structures.xlsx`와 분리)
+- 서식: 헤더 배경 #1E293B·흰 글자·굵게, freeze_panes=A2, Resolution number_format 0.00,
+  SMILES 컬럼은 폭 40+ (wrap 하지 않음).
+- State/Modality는 GPCRdb 의존 — 미등재 구조는 그 2칸만 빈칸/"-"(추측 금지).
+  나머지 구조·화학 컬럼(Mutation/Organism/Chain/SMILES 등)은 이 도구가 준 값을 그대로 사용.
 """
 
 
