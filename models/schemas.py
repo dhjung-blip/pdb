@@ -335,7 +335,8 @@ class StructureDetail(BaseModel):
     released_date: Optional[str] = None
     title: Optional[str] = None
     entities: List[StructureEntity] = Field(default_factory=list)
-    ligands: List[dict] = Field(default_factory=list)  # [{"id","name","smiles"}] 버퍼 제외
+    # [{"id","name"(IUPAC 계통명),"smiles","common_name"(통용명, 해석 실패 시 None)}] 버퍼 제외
+    ligands: List[dict] = Field(default_factory=list)
     # GPCRdb 병합(있으면). 미등재 구조는 None.
     state: Optional[str] = None
     ligand_modality: Optional[str] = None
