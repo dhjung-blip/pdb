@@ -38,6 +38,8 @@ from models.schemas import (
     PDBEntry,
     SearchResult,
     SequenceRegion,
+    StructureDetail,
+    StructureEntity,
     TargetBioactivities,
     TargetIntelligence,
     UniProtResult,
@@ -53,6 +55,7 @@ from tools.gpcrdb import (
     consume_pubchem_failures,
     get_gpcrdb_single,
     get_gpcrdb_structures,
+    normalize_modality,
 )
 from tools.ligand import fetch_ligand_detail
 from tools.literature import LiteratureAPIError, fetch_paper_abstract, search_papers
@@ -69,6 +72,7 @@ from tools.sequence import (
     fetch_natural_variants,
     fetch_sequence_region,
 )
+from tools.structure_detail import fetch_structure_detail
 from tools.uniprot import UniProtError, search_uniprot
 
 server = Server("pdb-research-server")
@@ -80,6 +84,7 @@ _STATE_RANK = {"Inactive": 0, "Active": 1, "Intermediate": 2}
 # --------------------------------------------------------------------------
 # 공통 유틸리티
 # --------------------------------------------------------------------------
+
 
 def _text(message: str) -> list[types.TextContent]:
     """단일 TextContent 응답을 생성한다."""
@@ -141,7 +146,7 @@ def _display_path(path: str) -> str:
     if display_dir and output_dir:
         output_dir = output_dir.rstrip("/")
         if path.startswith(output_dir):
-            return display_dir.rstrip("/") + path[len(output_dir):]
+            return display_dir.rstrip("/") + path[len(output_dir) :]
     return path
 
 
@@ -212,9 +217,7 @@ def _sort_structures(
     파이썬 정렬은 안정 정렬이므로 2단계 정렬로 그룹 내 순서를 보존한다.
     """
     if sort_by == "resolution":
-        result = sorted(
-            structures, key=lambda e: (e.resolution is None, e.resolution or 0.0)
-        )
+        result = sorted(structures, key=lambda e: (e.resolution is None, e.resolution or 0.0))
     elif sort_by == "state_then_date":
         result = sorted(structures, key=lambda e: e.released_date or "", reverse=True)
         result = sorted(result, key=lambda e: _STATE_RANK.get(e.state or "", 3))
@@ -241,16 +244,15 @@ def _apply_filters(
     notes: list[str] = []
 
     if max_resolution is not None:
-        result = [
-            e for e in result
-            if e.resolution is not None and e.resolution <= max_resolution
-        ]
+        result = [e for e in result if e.resolution is not None and e.resolution <= max_resolution]
         notes.append(f"해상도 ≤ {max_resolution:g}Å")
 
     if min_year is not None:
         result = [
-            e for e in result
-            if e.released_date and e.released_date[:4].isdigit()
+            e
+            for e in result
+            if e.released_date
+            and e.released_date[:4].isdigit()
             and int(e.released_date[:4]) >= min_year
         ]
         notes.append(f"{min_year}년 이후 공개")
@@ -262,10 +264,7 @@ def _apply_filters(
 
     if ligand_modality_filter:
         wanted = ligand_modality_filter.strip().lower()
-        result = [
-            e for e in result
-            if e.ligand_modality and e.ligand_modality.lower() == wanted
-        ]
+        result = [e for e in result if e.ligand_modality and e.ligand_modality.lower() == wanted]
         notes.append(f"Modality = {ligand_modality_filter}")
 
     if state_filter:
@@ -644,7 +643,7 @@ async def list_tools() -> list[types.Tool]:
                     "targets": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "검색할 유전자명 목록. 예: [\"HTR2A\", \"HTR2B\", \"HTR2C\"]",
+                        "description": '검색할 유전자명 목록. 예: ["HTR2A", "HTR2B", "HTR2C"]',
                     },
                     "export_excel": {
                         "type": "boolean",
@@ -693,6 +692,24 @@ async def list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["pdb_id"],
+            },
+        ),
+        types.Tool(
+            name="get_structure_detail",
+            description=_GET_STRUCTURE_DETAIL_DESCRIPTION,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "유전자명/단백질명. 예: HTR2A, HTR2B, HTR2C",
+                    },
+                    "max_structures": {
+                        "type": "integer",
+                        "description": "반환할 최대 구조 수. 미입력 시 전체.",
+                    },
+                },
+                "required": ["target"],
             },
         ),
         types.Tool(
@@ -913,6 +930,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         return await handle_search_family(arguments)
     if name == "get_pdb_detail":
         return await handle_get_pdb_detail(arguments)
+    if name == "get_structure_detail":
+        return await handle_get_structure_detail(arguments)
     if name == "compare_targets":
         return await handle_compare_targets(arguments)
     if name == "get_ligand_detail":
@@ -939,6 +958,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 # --------------------------------------------------------------------------
 # Tool 1: search_target
 # --------------------------------------------------------------------------
+
 
 async def _collect_target_search(
     arguments: dict,
@@ -986,9 +1006,13 @@ async def _collect_target_search(
         uniprot.pdb_ids = sorted(uniprot_set | rcsb_set)
 
     if not uniprot.pdb_ids:
-        return None, {}, (
-            f"'{uniprot.protein_name}' ({uniprot.accession})의 실험 구조가 "
-            f"PDB에 등록되어 있지 않습니다."
+        return (
+            None,
+            {},
+            (
+                f"'{uniprot.protein_name}' ({uniprot.accession})의 실험 구조가 "
+                f"PDB에 등록되어 있지 않습니다."
+            ),
         )
 
     # STEP 3: GPCR 여부 확인 (실패해도 비GPCR로 간주하고 진행)
@@ -1028,9 +1052,13 @@ async def _collect_target_search(
         return None, {}, "PDB 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요."
 
     if not fetched:
-        return None, {}, (
-            f"'{uniprot.protein_name}' ({uniprot.accession})의 PDB 구조 메타데이터를 "
-            f"조회하지 못했습니다. 잠시 후 다시 시도해주세요."
+        return (
+            None,
+            {},
+            (
+                f"'{uniprot.protein_name}' ({uniprot.accession})의 PDB 구조 메타데이터를 "
+                f"조회하지 못했습니다. 잠시 후 다시 시도해주세요."
+            ),
         )
 
     # STEP 6: GPCRdb 데이터 병합 + 제목 파싱 fallback
@@ -1070,10 +1098,14 @@ async def _collect_target_search(
 
     if not filtered:
         condition = ", ".join(filter_notes) if filter_notes else "지정한 조건"
-        return None, {}, (
-            f"'{uniprot.gene_name or target}' ({uniprot.accession})의 "
-            f"{fetched_count}개 구조 중 필터 조건({condition})에 맞는 구조가 없습니다. "
-            f"조건을 완화해 다시 시도해보세요."
+        return (
+            None,
+            {},
+            (
+                f"'{uniprot.gene_name or target}' ({uniprot.accession})의 "
+                f"{fetched_count}개 구조 중 필터 조건({condition})에 맞는 구조가 없습니다. "
+                f"조건을 완화해 다시 시도해보세요."
+            ),
         )
 
     # STEP 8: 정렬 (GPCR 기본 정렬은 state_then_date)
@@ -1179,19 +1211,26 @@ async def handle_search_target(arguments: dict) -> list[types.TextContent]:
 
     if result.uniprot.is_gpcr:
         text = _render_gpcr_result(
-            result, display,
-            metadata["fetched_count"], metadata["total_registered"],
-            metadata["effective_sort"], metadata["filter_notes"],
-            export_error, metadata["gpcrdb_warning"],
+            result,
+            display,
+            metadata["fetched_count"],
+            metadata["total_registered"],
+            metadata["effective_sort"],
+            metadata["filter_notes"],
+            export_error,
+            metadata["gpcrdb_warning"],
             metadata.get("failed_pdb_ids") or [],
             metadata.get("unindexed_pdb_ids") or [],
             metadata.get("rcsb_search_warning"),
         )
     else:
         text = _render_basic_result(
-            result, display,
-            metadata["fetched_count"], metadata["total_registered"],
-            metadata["effective_sort"], metadata["filter_notes"],
+            result,
+            display,
+            metadata["fetched_count"],
+            metadata["total_registered"],
+            metadata["effective_sort"],
+            metadata["filter_notes"],
             export_error,
             metadata.get("failed_pdb_ids") or [],
             metadata.get("unindexed_pdb_ids") or [],
@@ -1230,9 +1269,7 @@ async def handle_search_family(arguments: dict) -> list[types.TextContent]:
     details: list[str] = []
 
     for target in targets:
-        result, metadata, error = await _collect_target_search(
-            {"target": target, **shared_args}
-        )
+        result, metadata, error = await _collect_target_search({"target": target, **shared_args})
         if error or result is None:
             fail_label = classify_search_failure(error)
             rows.append(f"| {target} | - | {fail_label} | - | - | - | - |")
@@ -1291,7 +1328,9 @@ async def handle_search_family(arguments: dict) -> list[types.TextContent]:
     if exported_file:
         lines.append("")
         lines.append(f"> 📁 Excel 파일 저장됨: {_display_path(exported_file)}")
-        lines.append("> 이 Excel은 MCP 서버가 직접 생성했습니다. 별도 xlsx/명령 실행으로 다시 만들 필요가 없습니다.")
+        lines.append(
+            "> 이 Excel은 MCP 서버가 직접 생성했습니다. 별도 xlsx/명령 실행으로 다시 만들 필요가 없습니다."
+        )
     if export_error:
         lines.append("")
         lines.append(f"> ⚠️ {export_error}")
@@ -1299,8 +1338,7 @@ async def handle_search_family(arguments: dict) -> list[types.TextContent]:
     return _text("\n".join(lines))
 
 
-def _render_header(u: UniProtResult, query: str, total_registered: int,
-                   gpcr: bool) -> list[str]:
+def _render_header(u: UniProtResult, query: str, total_registered: int, gpcr: bool) -> list[str]:
     """검색 결과 텍스트의 공통 헤더 블록을 만든다."""
     title = f"## {u.gene_name or query} ({u.accession}) — 실험 구조 검색 결과"
     if gpcr:
@@ -1315,9 +1353,15 @@ def _render_header(u: UniProtResult, query: str, total_registered: int,
     return lines
 
 
-def _render_meta(lines: list[str], sort_by: str, fetched_count: int,
-                 filtered_count: int, displayed: int,
-                 filter_notes: list[str], gpcrdb_count: int | None) -> None:
+def _render_meta(
+    lines: list[str],
+    sort_by: str,
+    fetched_count: int,
+    filtered_count: int,
+    displayed: int,
+    filter_notes: list[str],
+    gpcrdb_count: int | None,
+) -> None:
     """정렬·필터·건수 메타 정보 줄을 추가한다."""
     parts: list[str] = []
     if gpcrdb_count is not None:
@@ -1384,8 +1428,9 @@ def _render_basic_result(
 
     _append_unindexed_note(lines, unindexed_pdb_ids, rcsb_search_warning)
 
-    _render_meta(lines, sort_by, fetched_count, len(result.structures),
-                 len(display), filter_notes, None)
+    _render_meta(
+        lines, sort_by, fetched_count, len(result.structures), len(display), filter_notes, None
+    )
 
     lines.append("")
     lines.append("| PDB ID | Resolution (Å) | Method | Released Date | 논문 |")
@@ -1432,8 +1477,15 @@ def _render_gpcr_result(
 
     _append_unindexed_note(lines, unindexed_pdb_ids, rcsb_search_warning)
 
-    _render_meta(lines, sort_by, fetched_count, len(result.structures),
-                 len(display), filter_notes, result.gpcrdb_count or 0)
+    _render_meta(
+        lines,
+        sort_by,
+        fetched_count,
+        len(result.structures),
+        len(display),
+        filter_notes,
+        result.gpcrdb_count or 0,
+    )
 
     lines.append("")
     lines.append(
@@ -1465,8 +1517,7 @@ def _render_gpcr_result(
     return "\n".join(lines)
 
 
-def _append_footer(lines: list[str], exported_file: str | None,
-                   export_error: str | None) -> None:
+def _append_footer(lines: list[str], exported_file: str | None, export_error: str | None) -> None:
     """Excel 저장 결과/오류 안내 줄을 추가한다."""
     if exported_file:
         lines.append("")
@@ -1479,6 +1530,141 @@ def _append_footer(lines: list[str], exported_file: str | None,
 # --------------------------------------------------------------------------
 # Tool 2: get_pdb_detail
 # --------------------------------------------------------------------------
+
+
+_GET_STRUCTURE_DETAIL_DESCRIPTION = """\
+'구조상세(structure-detail)' 포맷 데이터를 반환합니다 — 기존 약리 요약 포맷과 **별개**.
+
+[언제 호출]
+연구원이 "구조상세", "detail 포맷", "변이/SMILES/서열 포함", "RCSB 상세" 등을 명시하거나
+Mutation·Sequence Length·Chain·Organism·Gene·Macromolecule·Ligand SMILES가 필요할 때.
+그냥 "엑셀로 정리해줘"(약리 요약)이면 이 도구가 아니라 search_target/search_family를 씁니다.
+
+[출력] 타깃의 모든 PDB 구조에 대해 두 테이블:
+- 리간드 시트: PDB/Method/Res/Release/State/Organism/Mutation/Ligand/Modality/Ligand ID/SMILES/Note
+- 구조·엔티티 시트: PDB/Method/Res/Release/Structure Title/Chain ID/Seq Length/Organism/Gene/
+  Macromolecule Name/Mutation (엔티티·organism 단위 행)
+
+[엑셀 작성 시] 서브타입마다 `{타깃}_Ligand` + `{타깃}` 2시트, 파일명 `{타깃}_structure_detail_{YYYYMMDD}.xlsx`.
+State/Modality는 GPCRdb 의존 — 미등재 구조는 그 2칸만 빈칸(추측 금지).
+"""
+
+
+async def handle_get_structure_detail(arguments: dict) -> list[types.TextContent]:
+    target = (arguments.get("target") or "").strip()
+    if not target:
+        return _text("타깃 이름(유전자명/단백질명)을 입력해주세요. 예: HTR2A")
+    try:
+        uniprot = await search_uniprot(target)
+    except UniProtError as exc:
+        return _text(str(exc))
+    except Exception:
+        return _text("외부 API 연결에 실패했습니다. 네트워크 연결을 확인해주세요.")
+
+    # UniProt xref + RCSB Search union (신규 구조 포함)
+    try:
+        rcsb_ids = await search_pdb_ids_by_uniprot(uniprot.accession)
+    except RCSBSearchError:
+        rcsb_ids = []
+    pdb_ids = sorted({p.upper() for p in uniprot.pdb_ids} | {p.upper() for p in rcsb_ids})
+    if not pdb_ids:
+        return _text(
+            f"'{uniprot.protein_name}' ({uniprot.accession})의 실험 구조가 "
+            f"PDB에 등록되어 있지 않습니다."
+        )
+
+    # State/Modality는 GPCRdb에서만 (있으면 병합, 없으면 빈칸)
+    is_gpcr, slug = await check_gpcr(uniprot.entry_name)
+    gpcrdb_map: dict[str, dict] = {}
+    if is_gpcr and slug:
+        gpcrdb_map = await get_gpcrdb_structures(slug, pdb_ids=pdb_ids)
+
+    details = await fetch_structure_detail(pdb_ids)
+    details.sort(key=lambda d: d.released_date or "", reverse=True)
+    max_structures = _coerce_int(arguments.get("max_structures"))
+    if max_structures and len(details) > max_structures:
+        details = details[:max_structures]
+
+    return _text(_render_structure_detail(uniprot, details, gpcrdb_map))
+
+
+def _render_structure_detail(
+    uniprot: UniProtResult,
+    details: list[StructureDetail],
+    gpcrdb_map: dict[str, dict],
+) -> str:
+    label = uniprot.gene_name or uniprot.accession
+    gene_upper = (uniprot.gene_name or "").upper()
+    lines = [
+        f"## {label} ({uniprot.accession}) — 구조상세 (structure-detail)",
+        "",
+        f"총 {len(details)}개 구조 · 소스: RCSB (State/Modality만 GPCRdb)",
+        "",
+    ]
+
+    def receptor_entity(d: StructureDetail) -> StructureEntity | None:
+        for e in d.entities:
+            genes = [g for s in e.sources for g in (s.get("genes") or [])]
+            if gene_upper and any(gene_upper == (g or "").upper() for g in genes):
+                return e
+        return d.entities[0] if d.entities else None
+
+    # ── 리간드 시트 ──
+    lines.append(f"### 리간드 ({label}_Ligand 시트)")
+    lines.append(
+        "| PDB ID | Method | Res.(Å) | Release | State | Organism | Mutation "
+        "| Ligand | Modality | Ligand ID | SMILES | Note |"
+    )
+    lines.append("|" + "---|" * 12)
+    for d in details:
+        re_ent = receptor_entity(d)
+        organism = (
+            " / ".join(
+                s["organism"] for s in (re_ent.sources if re_ent else []) if s.get("organism")
+            )
+            or "-"
+        )
+        mutation = (re_ent.mutation if re_ent else None) or "-"
+        g = gpcrdb_map.get(d.pdb_id) or {}
+        prim = d.ligands[0] if d.ligands else {}
+        ligand_name = g.get("ligand") or prim.get("name") or "-"
+        modality = normalize_modality(g.get("ligand_modality")) or "-"
+        lines.append(
+            f"| {d.pdb_id} | {format_method(d.method)} | {_resolution_str(d.resolution)} "
+            f"| {d.released_date or '-'} | {g.get('state') or '-'} | {_md_escape(organism)} "
+            f"| {_md_escape(mutation)} | {_md_escape(_trim(ligand_name, 30))} | {modality} "
+            f"| {prim.get('id') or '-'} | {_trim(prim.get('smiles') or '-', 44)} | - |"
+        )
+
+    # ── 구조·엔티티 시트 (엔티티·organism 단위 행) ──
+    lines.append("")
+    lines.append(f"### 구조·엔티티 ({label} 시트)")
+    lines.append(
+        "| PDB ID | Method | Res.(Å) | Release | Structure Title | Chain ID "
+        "| Seq Length | Organism | Gene Name | Macromolecule Name | Mutation |"
+    )
+    lines.append("|" + "---|" * 11)
+    for d in details:
+        for e in sorted(d.entities, key=lambda e: e.chain_ids[0] if e.chain_ids else ""):
+            chain = ", ".join(e.chain_ids) or "-"
+            srcs = e.sources or [{"organism": None, "genes": []}]
+            for s in srcs:
+                org = s.get("organism") or "-"
+                genes = ", ".join(s.get("genes") or []) or "-"
+                lines.append(
+                    f"| {d.pdb_id} | {format_method(d.method)} | {_resolution_str(d.resolution)} "
+                    f"| {d.released_date or '-'} | {_md_escape(_trim(d.title, 40))} | {chain} "
+                    f"| {e.seq_length or '-'} | {_md_escape(org)} | {_md_escape(genes)} "
+                    f"| {_md_escape(_trim(e.macromolecule_name, 40))} | {_md_escape(e.mutation or '-')} |"
+                )
+
+    lines.append("")
+    lines.append(
+        "> ⓘ '구조상세' 엑셀: 서브타입마다 `{타깃}_Ligand` + `{타깃}` 2시트, "
+        "파일명 `{타깃}_structure_detail_{YYYYMMDD}.xlsx`. 기존 약리 요약과 별개."
+    )
+    return "\n".join(lines)
+
 
 async def handle_get_pdb_detail(arguments: dict) -> list[types.TextContent]:
     pdb_id = (arguments.get("pdb_id") or "").strip().upper()
@@ -1607,10 +1793,7 @@ def _render_pdb_detail(entry: PDBEntry) -> str:
         else:
             lines.append("- **DOI**: -")
         if cit.pmid:
-            lines.append(
-                f"- **PMID**: {cit.pmid} "
-                f"(https://pubmed.ncbi.nlm.nih.gov/{cit.pmid})"
-            )
+            lines.append(f"- **PMID**: {cit.pmid} (https://pubmed.ncbi.nlm.nih.gov/{cit.pmid})")
         else:
             lines.append("- **PMID**: -")
         lines.append(f"- **ACS 인용**: {format_acs_citation(cit)}")
@@ -1621,6 +1804,7 @@ def _render_pdb_detail(entry: PDBEntry) -> str:
 # --------------------------------------------------------------------------
 # Tool 3: compare_targets
 # --------------------------------------------------------------------------
+
 
 async def handle_compare_targets(arguments: dict) -> list[types.TextContent]:
     targets = arguments.get("targets")
@@ -1666,12 +1850,8 @@ async def handle_compare_targets(arguments: dict) -> list[types.TextContent]:
             uniprot.pdb_ids = sorted(uniprot_set | rcsb_set)
 
         if not uniprot.pdb_ids:
-            rows.append(
-                f"| {target} | {uniprot.accession} | {type_label} | 0 | - | - |"
-            )
-            details.append(
-                f"- **{target}** ({uniprot.accession}): 등록된 PDB 구조 없음"
-            )
+            rows.append(f"| {target} | {uniprot.accession} | {type_label} | 0 | - | - |")
+            details.append(f"- **{target}** ({uniprot.accession}): 등록된 PDB 구조 없음")
             continue
 
         # PDB 메타데이터 조회 — 실패한 ID와 API 오류를 분리해 details에 명시
@@ -1757,6 +1937,7 @@ def _latest_structure_cell(structures: list[PDBEntry]) -> str:
 # 알 수 없는 값은 "-" 로 표시하고, 임의로 채우지 않는다.
 # --------------------------------------------------------------------------
 
+
 def _format_num(value, fmt: str = "{:g}") -> str:
     """숫자를 표시 형식으로 변환. None이면 '-'."""
     if value is None:
@@ -1780,6 +1961,7 @@ def _trim(text: str | None, limit: int = 400) -> str:
 # --------------------------------------------------------------------------
 # Tool: get_ligand_detail
 # --------------------------------------------------------------------------
+
 
 async def handle_get_ligand_detail(arguments: dict) -> list[types.TextContent]:
     query = (arguments.get("query") or "").strip()
@@ -1817,9 +1999,13 @@ def _render_ligand_detail(d: LigandDetail) -> str:
     lines.append(f"- **Molecular Formula**: {d.molecular_formula or '-'}")
     lines.append(f"- **Molecular Weight**: {_format_num(d.molecular_weight, '{:.2f}')} g/mol")
     lines.append(f"- **XLogP**: {_format_num(d.xlogp, '{:.2f}')}")
-    lines.append(f"- **H-bond donors / acceptors**: {d.h_bond_donors if d.h_bond_donors is not None else '-'} / {d.h_bond_acceptors if d.h_bond_acceptors is not None else '-'}")
+    lines.append(
+        f"- **H-bond donors / acceptors**: {d.h_bond_donors if d.h_bond_donors is not None else '-'} / {d.h_bond_acceptors if d.h_bond_acceptors is not None else '-'}"
+    )
     lines.append(f"- **TPSA**: {_format_num(d.tpsa, '{:.1f}')} Å²")
-    lines.append(f"- **Rotatable bonds**: {d.rotatable_bonds if d.rotatable_bonds is not None else '-'}")
+    lines.append(
+        f"- **Rotatable bonds**: {d.rotatable_bonds if d.rotatable_bonds is not None else '-'}"
+    )
 
     lines.append("")
     lines.append("### 신약 단계 (ChEMBL)")
@@ -1865,6 +2051,7 @@ def _render_ligand_detail(d: LigandDetail) -> str:
 # Tool: get_target_bioactivities
 # --------------------------------------------------------------------------
 
+
 async def handle_get_target_bioactivities(
     arguments: dict,
 ) -> list[types.TextContent]:
@@ -1901,9 +2088,7 @@ async def handle_get_target_bioactivities(
     return _text(_render_bioactivities(result, min_pchembl))
 
 
-def _render_bioactivities(
-    r: TargetBioactivities, min_pchembl: float | None
-) -> str:
+def _render_bioactivities(r: TargetBioactivities, min_pchembl: float | None) -> str:
     label = r.gene_name or r.uniprot_accession or r.target_query
     lines = [f"## 타깃 활성 데이터 — {label} ({r.uniprot_accession})", ""]
     lines.append(f"- **ChEMBL target**: {r.chembl_target_id or '-'}")
@@ -1915,8 +2100,7 @@ def _render_bioactivities(
     collected = sum(r.source_counts.values()) if r.source_counts else r.total_count
     if r.source_counts:
         breakdown = " · ".join(
-            f"{s} {n}건"
-            for s, n in sorted(r.source_counts.items(), key=lambda x: -x[1])
+            f"{s} {n}건" for s, n in sorted(r.source_counts.items(), key=lambda x: -x[1])
         )
         lines.append(f"- **수집 소스 분해**: {breakdown} (합 {collected}건, dedup·절단 전)")
         chembl_got = r.source_counts.get("ChEMBL", 0)
@@ -1972,19 +2156,13 @@ def _render_bioactivities(
             lines.append("|------|--------|----|------|---------|-------|------|------|")
             for i, b in enumerate(rows, 1):
                 rel = b.standard_relation or ""
-                val = (
-                    f"{rel}{b.standard_value:.4g}"
-                    if b.standard_value is not None
-                    else "-"
-                )
+                val = f"{rel}{b.standard_value:.4g}" if b.standard_value is not None else "-"
                 # 이름 없는 소스(BindingDB)는 SMILES로 식별 + monomer 링크
                 if b.ligand_name:
                     ligand_disp = _md_escape(b.ligand_name)
                 elif b.smiles:
                     sm = _md_escape(_trim(b.smiles, 28))
-                    ligand_disp = (
-                        f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
-                    )
+                    ligand_disp = f"[{sm}]({b.source_url})" if b.source_url else f"`{sm}`"
                 else:
                     ligand_disp = "-"
                 lines.append(
@@ -2010,6 +2188,7 @@ def _render_bioactivities(
 # --------------------------------------------------------------------------
 # Tool: get_paper_abstract
 # --------------------------------------------------------------------------
+
 
 async def handle_get_paper_abstract(
     arguments: dict,
@@ -2070,13 +2249,10 @@ def _render_paper(p: PaperAbstract) -> str:
     if p.mesh_terms:
         lines.append("")
         lines.append(
-            f"**MeSH terms** ({len(p.mesh_terms)}개 중 상위 10): "
-            + ", ".join(p.mesh_terms[:10])
+            f"**MeSH terms** ({len(p.mesh_terms)}개 중 상위 10): " + ", ".join(p.mesh_terms[:10])
         )
     if p.keywords:
-        lines.append(
-            "**Keywords**: " + ", ".join(p.keywords[:10])
-        )
+        lines.append("**Keywords**: " + ", ".join(p.keywords[:10]))
 
     if p.source_url:
         lines.append("")
@@ -2087,6 +2263,7 @@ def _render_paper(p: PaperAbstract) -> str:
 # --------------------------------------------------------------------------
 # Tool: search_papers
 # --------------------------------------------------------------------------
+
 
 async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
     query = (arguments.get("query") or "").strip()
@@ -2104,9 +2281,7 @@ async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
         )
 
     if not papers:
-        return _text(
-            f"'{query}'에 대한 Europe PMC 검색 결과가 없습니다. 쿼리를 단순화해보세요."
-        )
+        return _text(f"'{query}'에 대한 Europe PMC 검색 결과가 없습니다. 쿼리를 단순화해보세요.")
 
     lines = [f"## 논문 검색 결과 — '{query}'", "", f"상위 {len(papers)}건"]
     for i, p in enumerate(papers, 1):
@@ -2117,9 +2292,7 @@ async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
             if len(p.authors) > 3:
                 authors += " et al."
             lines.append(f"- **저자**: {authors}")
-        venue = " · ".join(
-            x for x in [p.journal, str(p.year) if p.year else None] if x
-        )
+        venue = " · ".join(x for x in [p.journal, str(p.year) if p.year else None] if x)
         if venue:
             lines.append(f"- **저널/연도**: {venue}")
         ids = []
@@ -2140,6 +2313,7 @@ async def handle_search_papers(arguments: dict) -> list[types.TextContent]:
 # --------------------------------------------------------------------------
 # Tool: get_sequence_region
 # --------------------------------------------------------------------------
+
 
 async def handle_get_sequence_region(
     arguments: dict,
@@ -2172,17 +2346,14 @@ def _chunk_sequence(seq: str, start: int, width: int = 60) -> str:
     """FASTA-like 60글자/줄 + 줄 시작에 잔기 번호 표기."""
     lines: list[str] = []
     for i in range(0, len(seq), width):
-        chunk = seq[i: i + width]
+        chunk = seq[i : i + width]
         lines.append(f"{start + i:>5d}  {chunk}")
     return "\n".join(lines)
 
 
 def _render_sequence_region(r: SequenceRegion) -> str:
     name = r.protein_name or r.entry_name or r.accession
-    header = (
-        f"## 단백질 서열 — {name} ({r.accession}) "
-        f"[{r.start}-{r.end}, 전체 {r.full_length} aa]"
-    )
+    header = f"## 단백질 서열 — {name} ({r.accession}) [{r.start}-{r.end}, 전체 {r.full_length} aa]"
     lines = [header, ""]
     lines.append("### 서열 (FASTA-like)")
     lines.append("```")
@@ -2195,11 +2366,7 @@ def _render_sequence_region(r: SequenceRegion) -> str:
         lines.append("| Type | Range | 설명 | Ligand | 근거 |")
         lines.append("|------|-------|------|--------|------|")
         for f in r.features:
-            rng = (
-                f"{f.start}-{f.end}"
-                if f.start != f.end
-                else f"{f.start}"
-            )
+            rng = f"{f.start}-{f.end}" if f.start != f.end else f"{f.start}"
             lines.append(
                 f"| {f.type} "
                 f"| {rng} "
@@ -2220,6 +2387,7 @@ def _render_sequence_region(r: SequenceRegion) -> str:
 # --------------------------------------------------------------------------
 # Tool: get_natural_variants
 # --------------------------------------------------------------------------
+
 
 async def handle_get_natural_variants(
     arguments: dict,
@@ -2247,9 +2415,7 @@ async def handle_get_natural_variants(
     return _text(_render_variants(variants, position, disease_only))
 
 
-def _render_variants(
-    v: VariantList, position: int | None, disease_only: bool
-) -> str:
+def _render_variants(v: VariantList, position: int | None, disease_only: bool) -> str:
     header = f"## 자연 변이 — {v.entry_name or v.accession} ({v.accession})"
     lines = [header, ""]
     parts = []
@@ -2268,12 +2434,8 @@ def _render_variants(
         lines.append("조건에 맞는 알려진 자연 변이가 없습니다.")
     else:
         lines.append("")
-        lines.append(
-            "| Pos | WT | Var | 설명 | 질환 | 임상의의 | dbSNP | ClinVar |"
-        )
-        lines.append(
-            "|-----|----|-----|------|------|----------|-------|---------|"
-        )
+        lines.append("| Pos | WT | Var | 설명 | 질환 | 임상의의 | dbSNP | ClinVar |")
+        lines.append("|-----|----|-----|------|------|----------|-------|---------|")
         for nv in v.variants:
             lines.append(
                 f"| {nv.position} "
@@ -2295,6 +2457,7 @@ def _render_variants(
 # --------------------------------------------------------------------------
 # Tool: get_binding_site
 # --------------------------------------------------------------------------
+
 
 async def handle_get_binding_site(arguments: dict) -> list[types.TextContent]:
     pdb_id = (arguments.get("pdb_id") or "").strip().upper()
@@ -2323,9 +2486,7 @@ def _render_binding_sites(r: BindingSiteResult) -> str:
         title = f"### Site {site.site_id or '-'}"
         if site.ligand_code:
             ligand_label = (
-                f"{site.ligand_code} — {site.ligand_name}"
-                if site.ligand_name
-                else site.ligand_code
+                f"{site.ligand_code} — {site.ligand_name}" if site.ligand_name else site.ligand_code
             )
             title += f" · Ligand: {ligand_label}"
         if site.chain_id:
@@ -2334,8 +2495,7 @@ def _render_binding_sites(r: BindingSiteResult) -> str:
 
         if site.residues:
             res_strs = [
-                f"{r.residue_name} {r.residue_number} ({r.chain_id})"
-                for r in site.residues
+                f"{r.residue_name} {r.residue_number} ({r.chain_id})" for r in site.residues
             ]
             lines.append("")
             lines.append("**잔기 (" + str(len(res_strs)) + "개)**: " + ", ".join(res_strs))
@@ -2355,6 +2515,7 @@ def _render_binding_sites(r: BindingSiteResult) -> str:
 # --------------------------------------------------------------------------
 # Tool: get_alphafold_model
 # --------------------------------------------------------------------------
+
 
 async def handle_get_alphafold_model(
     arguments: dict,
@@ -2386,7 +2547,9 @@ def _render_alphafold(m: AlphaFoldModel) -> str:
     lines.append(f"- **Entry ID**: {m.entry_id or '-'}")
     lines.append(f"- **Organism**: {m.organism or '-'}")
     lines.append(
-        f"- **단백질 길이**: {m.sequence_length} aa" if m.sequence_length else "- **단백질 길이**: -"
+        f"- **단백질 길이**: {m.sequence_length} aa"
+        if m.sequence_length
+        else "- **단백질 길이**: -"
     )
     lines.append(f"- **모델 버전**: {m.model_version or '-'}")
     lines.append("")
@@ -2408,6 +2571,7 @@ def _render_alphafold(m: AlphaFoldModel) -> str:
 # --------------------------------------------------------------------------
 # Tool: get_target_intelligence
 # --------------------------------------------------------------------------
+
 
 async def handle_get_target_intelligence(
     arguments: dict,
@@ -2432,9 +2596,7 @@ async def handle_get_target_intelligence(
         )
 
     if intel is None:
-        return _text(
-            f"OpenTargets에서 '{query}'에 대한 타깃 정보를 찾지 못했습니다."
-        )
+        return _text(f"OpenTargets에서 '{query}'에 대한 타깃 정보를 찾지 못했습니다.")
     return _text(_render_target_intel(intel))
 
 
@@ -2472,12 +2634,8 @@ def _render_target_intel(t: TargetIntelligence) -> str:
         lines.append("")
         _kd = t.known_drug_count or len(t.known_drugs)
         _more_k = " · 더 보려면 max_drugs↑" if _kd > len(t.known_drugs) else ""
-        lines.append(
-            f"### Known drugs — 총 {_kd}건 중 {len(t.known_drugs)}건 표시{_more_k}"
-        )
-        lines.append(
-            "| Drug | Type | Mechanism | Max phase | Indication |"
-        )
+        lines.append(f"### Known drugs — 총 {_kd}건 중 {len(t.known_drugs)}건 표시{_more_k}")
+        lines.append("| Drug | Type | Mechanism | Max phase | Indication |")
         lines.append("|------|------|-----------|-----------|------------|")
         for k in t.known_drugs:
             phase = k.max_phase_for_indication
@@ -2615,11 +2773,10 @@ def build_sse_app(
     sse = SseServerTransport(message_endpoint, security_settings=security_settings)
 
     async def handle_sse(request: Request) -> Response:
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
+        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
             await mcp_server.run(
-                streams[0], streams[1],
+                streams[0],
+                streams[1],
                 mcp_server.create_initialization_options(),
             )
         # connect_sse 가 request._send 로 HTTP 응답을 이미 모두 전송하므로,
@@ -2714,7 +2871,8 @@ def main() -> None:
         async def run_stdio():
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(
-                    read_stream, write_stream,
+                    read_stream,
+                    write_stream,
                     server.create_initialization_options(),
                 )
 
