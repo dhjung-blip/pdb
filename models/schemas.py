@@ -310,3 +310,32 @@ class TargetIntelligence(BaseModel):
     disease_count: int = 0  # OpenTargets가 보고한 연관 질환 총 수 (표시는 max_diseases개)
     known_drug_count: int = 0  # known drug 후보 총 수 (표시는 max_drugs개, 중복 약물 통합)
     source_url: Optional[str] = None
+
+
+class StructureEntity(BaseModel):
+    """구조상세(structure-detail) 포맷용 — 폴리머 엔티티 단위 정보 (RCSB)."""
+
+    macromolecule_name: Optional[str] = None  # rcsb_polymer_entity.pdbx_description
+    chain_ids: List[str] = Field(default_factory=list)  # auth_asym_ids
+    seq_length: Optional[int] = None  # entity_poly.rcsb_sample_sequence_length
+    mutation: Optional[str] = None  # rcsb_polymer_entity.pdbx_mutation
+    # organism↔gene 매핑 보존 — 다중 organism 엔티티를 행 분리(예시 포맷) 위해
+    sources: List[dict] = Field(default_factory=list)  # [{"organism","genes":[...]}]
+
+
+class StructureDetail(BaseModel):
+    """구조상세 포맷용 — PDB 구조 1건의 엔티티+리간드 상세 (RCSB 중심).
+
+    기존 GPCR 약리 요약 포맷과 별개의 '구조상세' 전용 모델.
+    """
+
+    pdb_id: str
+    method: Optional[str] = None
+    resolution: Optional[float] = None
+    released_date: Optional[str] = None
+    title: Optional[str] = None
+    entities: List[StructureEntity] = Field(default_factory=list)
+    ligands: List[dict] = Field(default_factory=list)  # [{"id","name","smiles"}] 버퍼 제외
+    # GPCRdb 병합(있으면). 미등재 구조는 None.
+    state: Optional[str] = None
+    ligand_modality: Optional[str] = None

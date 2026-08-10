@@ -1,10 +1,10 @@
 [project]
 name = "pdb-mcp-server"
-version = "0.1.7"
+version = "0.1.8"
 description = "PDB 연구 자동화 MCP 서버"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.27.1",
+    "mcp>=1.27.1,<2.0",  # 2.0.0은 저수준 Server API 파손(@server.list_tools 제거)
     "httpx>=0.27.0",
     "openpyxl>=3.1.0",
     "pydantic>=2.0.0",
