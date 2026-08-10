@@ -72,7 +72,7 @@ from tools.sequence import (
     fetch_natural_variants,
     fetch_sequence_region,
 )
-from tools.structure_detail import fetch_structure_detail
+from tools.structure_detail import fetch_structure_detail, strip_name_markup
 from tools.uniprot import UniProtError, search_uniprot
 
 server = Server("pdb-research-server")
@@ -1588,7 +1588,10 @@ Mutation·Sequence Length·Chain·Organism·Gene·Macromolecule·Ligand SMILES�
 [엑셀 작성 시 — 이 규격 그대로]
 - 시트: 서브타입마다 `{타깃}_Ligand` + `{타깃}` 2장 (예: HTR2A_Ligand, HTR2A)
   - `{타깃}_Ligand` 컬럼 순서: PDB ID / Method / Resolution (Å) / Release Date / State /
-    Organism / Mutation / Ligand / Ligand Modality / Ligand ID / Ligand SMILES / Note
+    Organism / Mutation / Ligand / Ligand (IUPAC) / Ligand Modality / Ligand ID /
+    Ligand SMILES / Note
+    · `Ligand`는 통용명(GPCRdb 큐레이션 → PubChem 해석 순), `Ligand (IUPAC)`는 RCSB
+      계통명 원본. 통용명 해석에 실패하면 `Ligand`에도 계통명이 들어갑니다(추측 금지).
   - `{타깃}` 컬럼 순서: PDB ID / Method / Resolution (Å) / Release Date / Structure Title /
     Chain ID / Sequence Length / Organism / Gene Name / Macromolecule Name / Mutation
     (엔티티·organism 단위 행 — PDB 공통 필드는 첫 행에만 채우고 이어지는 행은 비움)
@@ -1663,9 +1666,9 @@ def _render_structure_detail(
     lines.append(f"### 리간드 ({label}_Ligand 시트)")
     lines.append(
         "| PDB ID | Method | Res.(Å) | Release | State | Organism | Mutation "
-        "| Ligand | Modality | Ligand ID | SMILES | Note |"
+        "| Ligand | Ligand (IUPAC) | Modality | Ligand ID | SMILES | Note |"
     )
-    lines.append("|" + "---|" * 12)
+    lines.append("|" + "---|" * 13)
     for d in details:
         re_ent = receptor_entity(d)
         organism = (
@@ -1677,12 +1680,17 @@ def _render_structure_detail(
         mutation = (re_ent.mutation if re_ent else None) or "-"
         g = gpcrdb_map.get(d.pdb_id) or {}
         prim = d.ligands[0] if d.ligands else {}
-        ligand_name = g.get("ligand") or prim.get("name") or "-"
+        # RCSB IUPAC 계통명 — 이탤릭 인코딩(~{R})만 정리해 사람이 읽을 수 있게
+        systematic = strip_name_markup(prim.get("name"))
+        # 통용명 우선순위: GPCRdb 큐레이션 → PubChem 해석 → (실패 시) 계통명
+        ligand_name = g.get("ligand") or prim.get("common_name") or systematic or "-"
+        iupac = systematic or "-"
         modality = normalize_modality(g.get("ligand_modality")) or "-"
         lines.append(
             f"| {d.pdb_id} | {format_method(d.method)} | {_resolution_str(d.resolution)} "
             f"| {d.released_date or '-'} | {g.get('state') or '-'} | {_md_escape(organism)} "
-            f"| {_md_escape(mutation)} | {_md_escape(_trim(ligand_name, 30))} | {modality} "
+            f"| {_md_escape(mutation)} | {_md_escape(_trim(ligand_name, 30))} "
+            f"| {_md_escape(_trim(iupac, 46))} | {modality} "
             f"| {prim.get('id') or '-'} | {_trim(prim.get('smiles') or '-', 44)} | - |"
         )
 
